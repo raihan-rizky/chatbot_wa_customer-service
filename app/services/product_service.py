@@ -45,8 +45,10 @@ async def fetch_products() -> list[dict]:
 
     # Return cached data if still fresh
     if _cache is not None and (time.time() - _cache_ts) < CACHE_TTL:
+        logger.info("Product fetch: Using cached products (count: %d)", len(_cache))
         return _cache
 
+    logger.info("Product fetch: Starting request to Supabase...")
     params = {
         "select": "name,sku,price,unit,categoryId,material,stock",
         "order": "categoryId.asc,name.asc",
@@ -56,16 +58,16 @@ async def fetch_products() -> list[dict]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(_base_url(), headers=_headers(), params=params)
             if resp.status_code >= 400:
-                logger.error("Failed to fetch products: %s %s", resp.status_code, resp.text)
+                logger.error("Product fetch failed: HTTP %s - %s", resp.status_code, resp.text)
                 return _cache or []
 
             products = resp.json()
             _cache = products
             _cache_ts = time.time()
-            logger.info("Fetched %d products from Supabase", len(products))
+            logger.info("Product fetch SUCCESS: Retrieved %d products from Supabase", len(products))
             return products
-    except Exception:
-        logger.exception("Error fetching products from Supabase")
+    except Exception as e:
+        logger.exception("Product fetch ERROR: An exception occurred during fetch_products. Exception: %s", str(e))
         return _cache or []
 
 
@@ -102,8 +104,11 @@ def format_products_for_prompt(products: list[dict]) -> str:
                 line += f" [SKU: {sku}]"
 
             # Stock info for the AI (not necessarily shared with customer)
-            if stock is not None and stock <= 0:
-                line += " ⚠️ STOK HABIS"
+            if stock is not None:
+                if stock <= 0:
+                    line += " ⚠️ STOK HABIS"
+                else:
+                    line += f" [Stok tersedia: {stock}]"
 
             lines.append(line)
 

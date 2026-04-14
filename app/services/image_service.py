@@ -52,8 +52,10 @@ JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan.
 
 async def _build_design_prompt() -> str:
     """Build the design analysis prompt with live product catalog."""
+    logger.info("Vision LLM: Building design prompt...")
     products = await fetch_products()
     catalog_text = format_products_for_prompt(products)
+    logger.info("Vision LLM: Design prompt built. Catalog size: %d bytes", len(catalog_text))
     return DESIGN_PROMPT_TEMPLATE.format(catalog=catalog_text)
 
 
@@ -66,15 +68,14 @@ async def download_wa_media(msg_id: str) -> bytes:
     if settings.waha_api_key:
         headers["X-Api-Key"] = settings.waha_api_key
 
+    logger.info("WAHA Media: Starting download for msg %s", msg_id)
     async with httpx.AsyncClient(timeout=30.0) as client:
-        logger.info("📥 Downloading media via WAHA for msg %s", msg_id)
-
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
-            logger.error("Failed to download media %s — HTTP %s", msg_id, resp.status_code)
+            logger.error("WAHA Media ERROR: Failed to download media %s — HTTP %s", msg_id, resp.status_code)
             return b""
 
-        logger.info("📥 Downloaded %d bytes", len(resp.content))
+        logger.info("WAHA Media SUCCESS: Downloaded %d bytes for msg %s", len(resp.content), msg_id)
         return resp.content
 
 
@@ -84,9 +85,11 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     Returns:
         str: Description and design estimation.
     """
+    logger.info("Vision LLM: Starting image analysis. Image size: %d bytes, caption: %s", len(image_bytes), caption)
     llm = _get_vision_llm()
 
     # Encode image to base64
+    logger.info("Vision LLM: Encoding image to base64...")
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
     # Build dynamic prompt with live catalog
@@ -109,14 +112,15 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
         ),
     ]
 
+    logger.info("Vision LLM: Sending request to vision model...")
     try:
         response = await llm.ainvoke(messages)
         content = response.content
-        logger.info("Vision LLM output: %s", str(content)[:200])
+        logger.info("Vision LLM SUCCESS: Received response. Preview: %s", str(content)[:100].replace('\n', ' '))
 
         return str(content)
 
-    except Exception:
-        logger.exception("Vision model call failed")
+    except Exception as e:
+        logger.exception("Vision LLM ERROR: Vision model call failed. Exception: %s", str(e))
         return "Maaf, saya gagal menganalisa gambar ini. Coba kirim ulang dengan resolusi lebih jelas ya! 🙏"
 

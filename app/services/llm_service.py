@@ -62,8 +62,10 @@ def _get_llm() -> ChatNebius:
 
 async def _build_system_prompt() -> str:
     """Build the full system prompt with live product catalog from Supabase."""
+    logger.info("LLM: Building system prompt...")
     products = await fetch_products()
     catalog_text = format_products_for_prompt(products)
+    logger.info("LLM: System prompt built. Catalog size: %d bytes", len(catalog_text))
 
     return (
         SYSTEM_PROMPT_BASE
@@ -83,14 +85,18 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     Returns:
         The AI-generated reply as a plain string.
     """
+    logger.info("LLM [phone=%s]: Starting response generation...", phone)
     llm = _get_llm()
     settings = get_settings()
 
     # Save user message to Supabase
+    logger.info("LLM [phone=%s]: Saving user message to history...", phone)
     await save_message(phone, "user", user_message)
 
     # Load recent history from Supabase
+    logger.info("LLM [phone=%s]: Loading chat history (limit=%d)...", phone, settings.max_history_length)
     history_rows = await get_history(phone, limit=settings.max_history_length)
+    logger.info("LLM [phone=%s]: Loaded %d history rows.", phone, len(history_rows))
 
     # Build system prompt with live product data
     system_prompt = await _build_system_prompt()
@@ -103,15 +109,18 @@ async def get_ai_response(phone: str, user_message: str) -> str:
         elif row["role"] == "assistant":
             messages.append(AIMessage(content=row["content"]))
 
+    logger.info("LLM [phone=%s]: Sending request to Nebius LLM (model=%s)...", phone, settings.nebius_model)
     try:
         response = await llm.ainvoke(messages)
         reply = response.content
+        logger.info("LLM [phone=%s]: Response SUCCESS. Reply length: %d chars.", phone, len(str(reply)))
 
         # Save AI reply to Supabase
+        logger.info("LLM [phone=%s]: Saving assistant reply to history...", phone)
         await save_message(phone, "assistant", reply)
 
         return reply  # type: ignore[return-value]
-    except Exception:
-        logger.exception("Nebius LLM call failed for phone=%s", phone)
+    except Exception as e:
+        logger.exception("LLM [phone=%s]: ERROR calling Nebius LLM. Exception: %s", phone, str(e))
         return "Sorry, I'm having trouble thinking right now. Please try again in a moment. 🙏"
 
