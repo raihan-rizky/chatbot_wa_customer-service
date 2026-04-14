@@ -1,23 +1,21 @@
-"""Image service — download WhatsApp media & extract receipt info via vision model."""
+"""Image service — download WhatsApp media & analyze designs via vision model."""
 
 from __future__ import annotations
 
 import base64
-import json
 import logging
-import re
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nebius import ChatNebius
 
 from app.config import get_settings
+from app.services.product_service import fetch_products, format_products_for_prompt
 
 logger = logging.getLogger(__name__)
 
 # ── Lazy-initialised vision LLM ─────────────────────────────────
 _vision_llm: ChatNebius | None = None
-_llm: ChatNebius | None = None
 
 
 def _get_vision_llm() -> ChatNebius:
@@ -28,49 +26,36 @@ def _get_vision_llm() -> ChatNebius:
         _vision_llm = ChatNebius(
             api_key=settings.nebius_api_key,
             model=settings.nebius_vision_model,
-            temperature=0.1,  # very low temp for strict JSON
+            temperature=0.1,  # very low temp for strict analysis
             max_tokens=2048,
         )
     return _vision_llm
 
-def _get_llm() -> ChatNebius:
-    """Return (and cache) the ChatNebius instance."""
-    global _llm
-    if _llm is None:
-        settings = get_settings()
-        _llm = ChatNebius(
-            api_key=settings.nebius_api_key,
-            model=settings.nebius_model,
-            temperature=0.1,
-            max_tokens=2048,
-        )
-    return _llm
 
-
-# ── Design extraction prompt ───────────────────────────────────
-DESIGN_IMAGE_PROMPT = """Kamu adalah asisten percetakan ahli di Toko Teladan.
+# ── Design prompt template (catalog injected at runtime) ────────
+DESIGN_PROMPT_TEMPLATE = """Kamu adalah asisten percetakan ahli di Toko Teladan.
 Tugasmu adalah menganalisis gambar/desain yang dikirim pelanggan dan memberikan estimasi atau saran cetak.
 
 Panduan Analisis:
 1. Deskripsikan secara singkat gambar apa itu (misal: logo, desain spanduk, brosur, atau poster).
 2. Sebutkan warna-warna dominan atau elemen utama.
-3. Berikan saran bahan yang cocok (misal: Spanduk Flexi Korea, Cetak Luster, Stiker Vinyl) dan sebutkan harganya berdasarkan katalog berikut:
-   - Spanduk Flexi 280gr (China) - Rp 25.000/m²
-   - Spanduk Flexi 340gr (Korea) - Rp 45.000/m²
-   - Spanduk Flexi 510gr (Jerman) - Rp 85.000/m²
-   - Cetak Luster - Rp 115.000/m²
-   - Cetak PVC Rigid - Rp 120.000/m²
-   - Stiker Vinyl - Rp 75.000/m²
-   - Stiker One Way Vision - Rp 85.000/m²
+3. Berikan saran bahan yang cocok dan sebutkan harganya berdasarkan katalog toko berikut:
+{catalog}
 4. Jika ada teks di dalam gambar, baca dan sebutkan teks apa yang terlihat (OCR ringan).
 
 Format Keluaran:
 Gunakan bahasa Indonesia yang santai, ramah, dan profesional layaknya admin WhatsApp.
 Gunakan emoji secukupnya. Jawab langsung dalam paragraf rapi tanpa format terstruktur (JSON).
+JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan.
 """
 
-GENERAL_IMAGE_PROMPT = """Kamu adalah asisten AI yang dapat melihat gambar.
-Tolong deskripsikan gambar ini dengan ramah kepada pelanggan."""
+
+async def _build_design_prompt() -> str:
+    """Build the design analysis prompt with live product catalog."""
+    products = await fetch_products()
+    catalog_text = format_products_for_prompt(products)
+    return DESIGN_PROMPT_TEMPLATE.format(catalog=catalog_text)
+
 
 async def download_wa_media(msg_id: str) -> bytes:
     """Download media from WAHA API using the message ID."""
@@ -83,19 +68,19 @@ async def download_wa_media(msg_id: str) -> bytes:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         logger.info("📥 Downloading media via WAHA for msg %s", msg_id)
-        
+
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             logger.error("Failed to download media %s — HTTP %s", msg_id, resp.status_code)
             return b""
-            
+
         logger.info("📥 Downloaded %d bytes", len(resp.content))
         return resp.content
 
 
 async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     """Analyze an image using the Nebius vision model.
-    
+
     Returns:
         str: Description and design estimation.
     """
@@ -104,9 +89,10 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     # Encode image to base64
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-    # Build multimodal message
-    system_prompt = DESIGN_IMAGE_PROMPT
-    user_text = f"Tolong lihat gambar desain ini dan berikan saran cetak."
+    # Build dynamic prompt with live catalog
+    system_prompt = await _build_design_prompt()
+
+    user_text = "Tolong lihat gambar desain ini dan berikan saran cetak."
     if caption:
         user_text += f"\nCatatan dari pelanggan: {caption}"
 
@@ -126,10 +112,11 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     try:
         response = await llm.ainvoke(messages)
         content = response.content
-        logger.info("Vision LLM output: %s", str(content)[:200]) # Log first 200 chars
+        logger.info("Vision LLM output: %s", str(content)[:200])
 
         return str(content)
 
     except Exception:
         logger.exception("Vision model call failed")
         return "Maaf, saya gagal menganalisa gambar ini. Coba kirim ulang dengan resolusi lebih jelas ya! 🙏"
+

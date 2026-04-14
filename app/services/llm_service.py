@@ -9,11 +9,12 @@ from langchain_nebius import ChatNebius
 
 from app.config import get_settings
 from app.services.chat_history import save_message, get_history
+from app.services.product_service import fetch_products, format_products_for_prompt
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt ────────────────────────────────────────────────
-SYSTEM_PROMPT = (
+# ── Base system prompt (product catalog is injected dynamically) ─
+SYSTEM_PROMPT_BASE = (
     "Kamu adalah asisten AI customer service untuk 'Toko Teladan Percetakan dan ATK'. "
     "Tugas utamamu adalah membantu menjawab pertanyaan pelanggan, memberikan informasi produk, "
     "katalog harga, estimasi biaya cetak, dan panduan cara order. "
@@ -22,17 +23,9 @@ SYSTEM_PROMPT = (
     "- Jam Buka: 08:00 - 17:00 WIB.\n"
     "- Kontak Pemesanan (WhatsApp): 085959929700.\n"
     "- Pembayaran: Cash, Transfer Bank, atau QRIS.\n"
-    "\n\nKatalog Produk & Harga (Banner/Spanduk):\n"
-    "1. Spanduk Flexi 280gr (China) - Rp 25.000/m²\n"
-    "2. Spanduk Flexi 340gr (Korea) - Rp 45.000/m²\n"
-    "3. Spanduk Flexi 510gr (Jerman) - Rp 85.000/m²\n"
-    "4. Cetak Luster - Rp 115.000/m²\n"
-    "5. Cetak PVC Rigid - Rp 120.000/m²\n"
-    "6. Stiker Vinyl - Rp 75.000/m²\n"
-    "7. Stiker One Way Vision - Rp 85.000/m²\n"
-    "\n\nKatalog ATK (Alat Tulis Kantor):\n"
-    "Tersedia berbagai kebutuhan ATK seperti pulpen, buku tulis, amplop, kertas HVS, map, penggaris, "
-    "dan alat tulis sekolah/kantor lainnya dengan harga terjangkau.\n"
+)
+
+SYSTEM_PROMPT_RULES = (
     "\n\nCara Order Cetak:\n"
     "1. Konsultasi ukuran dan bahan (pelanggan bisa kirim gambar/desain).\n"
     "2. AI akan memberikan estimasi harga.\n"
@@ -44,7 +37,9 @@ SYSTEM_PROMPT = (
     "- Gunakan emoji secukupnya agar chat terasa hidup.\n"
     "- Jika pelanggan mengirim gambar/desain, AI (sub-sistem) akan mendeskripsikannya. Berikan saran bahan dan estimasi harganya.\n"
     "- Jika ada pertanyaan di luar cetak/ATK, sampaikan dengan sopan bahwa kamu hanya asisten Toko Teladan.\n"
-    "- Jika tidak tahu harganya atau pelanggan minta pesanan khusus/partai besar, sarankan untuk hubungi CS/Admin di toko atau via WhatsApp 085959929700."
+    "- Jika tidak tahu harganya atau pelanggan minta pesanan khusus/partai besar, sarankan untuk hubungi CS/Admin di toko atau via WhatsApp 085959929700.\n"
+    "- Jika suatu produk bertanda STOK HABIS, beritahu pelanggan dan tawarkan alternatif lain.\n"
+    "- JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan."
 )
 
 # ── Lazy-initialised LLM instance ───────────────────────────────
@@ -63,6 +58,19 @@ def _get_llm() -> ChatNebius:
             top_p=0.95,
         )
     return _llm
+
+
+async def _build_system_prompt() -> str:
+    """Build the full system prompt with live product catalog from Supabase."""
+    products = await fetch_products()
+    catalog_text = format_products_for_prompt(products)
+
+    return (
+        SYSTEM_PROMPT_BASE
+        + "\n\nKatalog Produk & Harga (dari database toko):\n"
+        + catalog_text
+        + SYSTEM_PROMPT_RULES
+    )
 
 
 async def get_ai_response(phone: str, user_message: str) -> str:
@@ -84,8 +92,11 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     # Load recent history from Supabase
     history_rows = await get_history(phone, limit=settings.max_history_length)
 
+    # Build system prompt with live product data
+    system_prompt = await _build_system_prompt()
+
     # Convert DB rows to LangChain messages
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    messages = [SystemMessage(content=system_prompt)]
     for row in history_rows:
         if row["role"] == "user":
             messages.append(HumanMessage(content=row["content"]))
@@ -103,5 +114,4 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     except Exception:
         logger.exception("Nebius LLM call failed for phone=%s", phone)
         return "Sorry, I'm having trouble thinking right now. Please try again in a moment. 🙏"
-
 
