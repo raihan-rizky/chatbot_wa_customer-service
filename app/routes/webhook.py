@@ -46,6 +46,20 @@ async def receive_message(request: Request):
     msg_id = payload.get("id", "")
     sender_jid = payload.get("from", "")
 
+    # Handle WAHA lid addressing to get real whatsapp number
+    keys_data = payload.get("_data", {}).get("key", {})
+    if "remoteJidAlt" in keys_data:
+        alt_jid = keys_data["remoteJidAlt"]
+        if "@s.whatsapp.net" in alt_jid:
+            sender_jid = alt_jid.replace("@s.whatsapp.net", "@c.us")
+    elif "remoteJid" in keys_data:
+        remote_jid = keys_data["remoteJid"]
+        if "@s.whatsapp.net" in remote_jid:
+            sender_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+
+    if "@s.whatsapp.net" in sender_jid:
+        sender_jid = sender_jid.replace("@s.whatsapp.net", "@c.us")
+
     # Ignore group messages and status broadcasts
     if "@g.us" in sender_jid or "status@broadcast" in sender_jid:
         return {"status": "ok"}
@@ -115,8 +129,8 @@ async def _handle_single_image(phone: str, payload: dict) -> None:
         user_content = caption if caption else "[Gambar dikirim]"
         await save_message(phone, "user", user_content, image_url=f"wa_media:{msg_id}")
 
-        # Download image from WAHA API
-        image_bytes = await download_wa_media(msg_id)
+        # Download image from WAHA API by looking at recent chat messages
+        image_bytes = await download_wa_media(phone, msg_id)
         if not image_bytes:
             logger.error("Failed to download image %s", msg_id)
             await send_message(phone, "Maaf, gagal mengunduh gambar ini. Coba kirim ulang.")

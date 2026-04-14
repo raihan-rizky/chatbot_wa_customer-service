@@ -39,14 +39,16 @@ Tugasmu adalah menganalisis gambar/desain yang dikirim pelanggan dan memberikan 
 Panduan Analisis:
 1. Deskripsikan secara singkat gambar apa itu (misal: logo, desain spanduk, brosur, atau poster).
 2. Sebutkan warna-warna dominan atau elemen utama.
-3. Berikan saran bahan yang cocok dan sebutkan harganya berdasarkan katalog toko berikut:
+3. Cek deskripsi gambar apakah cocok/sesuai dengan produk yang ada pada katalog toko berikut:
 {catalog}
-4. Jika ada teks di dalam gambar, baca dan sebutkan teks apa yang terlihat (OCR ringan).
+Jika cocok, berikan informasi produk tersebut seperti harga dan stok (namun JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan).
+4. Jika tidak berkaitan dengan produk alat tulis, perlengkapan kantor (stationary), percetakan, atau banner (luar domain/konteks toko), maka langsung jawab dengan tegas namun ramah:
+"Mohon maaf, itu di luar layanan kami. Silakan tulis atau unggah gambar barang-barang yang berkaitan dengan percetakan, spanduk, atau alat tulis/kantor saja ya."
+5. Jika ada teks di dalam gambar, baca dan sebutkan teks apa yang terlihat (OCR ringan).
 
 Format Keluaran:
 Gunakan bahasa Indonesia yang santai, ramah, dan profesional layaknya admin WhatsApp.
 Gunakan emoji secukupnya. Jawab langsung dalam paragraf rapi tanpa format terstruktur (JSON).
-JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan.
 """
 
 
@@ -59,24 +61,61 @@ async def _build_design_prompt() -> str:
     return DESIGN_PROMPT_TEMPLATE.format(catalog=catalog_text)
 
 
-async def download_wa_media(msg_id: str) -> bytes:
-    """Download media from WAHA API using the message ID."""
+async def download_wa_media(phone: str, msg_id: str) -> bytes:
+    """Download media from WAHA API by fetching recent chat messages."""
     settings = get_settings()
-    url = f"{settings.waha_base_url}/api/{settings.waha_session}/messages/{msg_id}/download"
+    chat_id = f"{phone}@c.us"
+    url = f"{settings.waha_base_url}/api/{settings.waha_session}/chats/{chat_id}/messages?limit=10&downloadMedia=true"
 
     headers = {}
     if settings.waha_api_key:
         headers["X-Api-Key"] = settings.waha_api_key
 
-    logger.info("WAHA Media: Starting download for msg %s", msg_id)
+    logger.info("WAHA Media: Fetching messages for %s to find media", chat_id)
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
-            logger.error("WAHA Media ERROR: Failed to download media %s — HTTP %s", msg_id, resp.status_code)
+            logger.error("WAHA Media ERROR: Failed to get messages for %s — HTTP %s", chat_id, resp.status_code)
             return b""
+        
+        messages = resp.json()
+        target_media_url = None
+        
+        # Look for the message that has Media
+        for msg in messages:
+            if msg.get("hasMedia") and msg.get("media") and msg["media"].get("url"):
+                target_media_url = msg["media"]["url"]
+                # Optionally check if this is the exact message if IDs match
+                # But since ID from payload and ID from API might differ slightly,
+                # we just take the first recent media if msg_id doesn't exactly match.
+                msg_id_in_api = msg.get("id", "")
+                if msg_id in msg_id_in_api:
+                    break
+        
+        if not target_media_url:
+            logger.error("WAHA Media ERROR: No media found in recent messages for msg %s", msg_id)
+            return b""
+            
+        # Download the actual file from the URL found
+        # Usually target_media_url is a fully qualified URL to WAHA's file server.
+        # But if it's localhost and we're inside docker, we might need to replace the base URL.
+        # For safety, if waha_base_url is different from the origin of target_media_url, replace it.
+        if "localhost" in target_media_url or "127.0.0.1" in target_media_url:
+            # Simple replacement if WAHA is running in docker (e.g., http://waha:3000)
+            from urllib.parse import urlparse
+            parsed_media = urlparse(target_media_url)
+            parsed_base = urlparse(settings.waha_base_url)
+            target_media_url = target_media_url.replace(f"{parsed_media.scheme}://{parsed_media.netloc}", f"{parsed_base.scheme}://{parsed_base.netloc}")
 
-        logger.info("WAHA Media SUCCESS: Downloaded %d bytes for msg %s", len(resp.content), msg_id)
-        return resp.content
+        logger.info("WAHA Media: Downloading from URL %s", target_media_url)
+        # Download media file
+        file_resp = await client.get(target_media_url, headers=headers)
+        if file_resp.status_code != 200:
+            logger.error("WAHA Media ERROR: Failed to download media file — HTTP %s", file_resp.status_code)
+            return b""
+            
+        logger.info("WAHA Media SUCCESS: Downloaded %d bytes", len(file_resp.content))
+        return file_resp.content
 
 
 async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
