@@ -25,13 +25,18 @@ _processed_ids: set[str] = set()
 @router.post("/webhook")
 async def receive_message(request: Request):
     """Receive incoming WhatsApp messages (WAHA format) and process replies."""
+    print("🔔 WEBHOOK ENDPOINT HIT!")  # Force print to Vercel logs
+    
     try:
         body = await request.json()
+        print("WEBHOOK BODY:", body)
     except Exception:
+        print("WEBHOOK ERROR: Invalid JSON")
         return {"status": "ok"}
 
     event = body.get("event")
     if event != "message":
+        print("WEBHOOK: Ignored event type:", event)
         return {"status": "ok"}
 
     payload = body.get("payload", {})

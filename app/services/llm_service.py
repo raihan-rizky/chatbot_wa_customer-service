@@ -54,7 +54,7 @@ def _get_llm() -> ChatNebius:
         _llm = ChatNebius(
             api_key=settings.nebius_api_key,
             model=settings.nebius_model,
-            temperature=0.7,
+            temperature=0.2 ,
             top_p=0.95,
         )
     return _llm
