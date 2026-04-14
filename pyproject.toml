@@ -1,0 +1,17 @@
+[project]
+name = "chatbot-wa"
+version = "1.0.0"
+description = "AI-powered WhatsApp chatbot with OCR"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "langchain-nebius>=0.1.0",
+    "langchain-core>=0.3.0",
+    "httpx>=0.28.0",
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.7.0",
+]
+
+[tool.uv.scripts]
+dev = "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
