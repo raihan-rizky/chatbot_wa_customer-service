@@ -15,31 +15,21 @@ logger = logging.getLogger(__name__)
 
 # ── Base system prompt (product catalog is injected dynamically) ─
 SYSTEM_PROMPT_BASE = (
-    "Kamu adalah asisten AI customer service untuk 'Toko Teladan Percetakan dan ATK'. "
-    "Tugas utamamu adalah membantu menjawab pertanyaan pelanggan, memberikan informasi produk, "
-    "katalog harga, estimasi biaya cetak, dan panduan cara order. "
-    "\n\nInformasi Toko:\n"
-    "- Alamat: Jl. Temu Putih No.30, Jombang Wetan, Kec. Jombang, Kota Cilegon, Banten, 42411.\n"
-    "- Jam Buka: 08:00 - 17:00 WIB.\n"
-    "- Kontak Pemesanan (WhatsApp): 085959929700.\n"
-    "- Pembayaran: Cash, Transfer Bank, atau QRIS.\n"
+    "CS 'Toko Teladan Percetakan & ATK'. Jawab seputar produk/harga/order.\n"
+    "Jl. Temu Putih No.30 Cilegon. 08:00-17:00. WA:085959929700. Cash/Trf/QRIS."
 )
 
 SYSTEM_PROMPT_RULES = (
-    "\n\nCara Order Cetak:\n"
-    "1. Konsultasi ukuran dan bahan (pelanggan bisa kirim gambar/desain).\n"
-    "2. AI akan memberikan estimasi harga.\n"
-    "3. Jika pelanggan setuju, pelanggan wajib mengirim desain final (PDF/JPG resolusi tinggi).\n"
-    "4. Pembayaran DP minimal 50% atau Lunas via transfer/QRIS.\n"
-    "5. Pesanan diproses.\n"
-    "\n\nAturan Menjawab:\n"
-    "- Jawablah dengan sangat ramah, sopan, antusias dan jelas. Gunakan bahasa Indonesia yang santai layaknya chat WhatsApp.\n"
-    "- Gunakan emoji secukupnya agar chat terasa hidup.\n"
-    "- Jika pelanggan mengirim gambar/desain, AI (sub-sistem) akan mendeskripsikannya. Berikan saran bahan dan estimasi harganya.\n"
-    "- Jika ada pertanyaan di luar cetak/ATK, sampaikan dengan sopan bahwa kamu hanya asisten Toko Teladan.\n"
-    "- Jika tidak tahu harganya atau pelanggan minta pesanan khusus/partai besar, sarankan untuk hubungi CS/Admin di toko atau via WhatsApp 085959929700.\n"
-    "- Jika suatu produk bertanda STOK HABIS, beritahu pelanggan dan tawarkan alternatif lain.\n"
-    "- JANGAN pernah menyebutkan istilah 'costPrice' atau harga modal ke pelanggan."
+    "\n\nATURAN WAJIB:\n"
+    "- Jawab sesingkat mungkin. Maksimal 2-3 kalimat.\n"
+    "- Langsung berikan harga atau info tanpa basa-basi.\n"
+    "- Ramah, 1-2 emoji.\n"
+    "- Gambar/desain: deskripsikan, beri saran & estimasi.\n"
+    "- Tolak di luar ATK/cetak.\n"
+    "- Order khusus/partai besar/tak tahu harga -> WA 085959929700.\n"
+    "- STOK 0 -> tawarkan opsi lain.\n"
+    "- DILARANG sebut 'costPrice'/modal.\n"
+    "Alur: 1.Tanya 2.Estimasi 3.Desain 4.DP/Lunas 5.Proses."
 )
 
 # ── Lazy-initialised LLM instance ───────────────────────────────
@@ -54,23 +44,38 @@ def _get_llm() -> ChatNebius:
         _llm = ChatNebius(
             api_key=settings.nebius_api_key,
             model=settings.nebius_model,
-            temperature=0.2, # 0.2 - 0.3 untuk jawaban lebih terstruktur dan tidak bertele-tele
+            temperature=0.1, # Diturunkan agar jawaban ringkas & deterministik
             top_p=0.95,
         )
     return _llm
 
 
-async def _build_system_prompt() -> str:
+async def _build_system_prompt(user_message: str) -> str:
     """Build the full system prompt with live product catalog from Supabase."""
     logger.info("LLM: Building system prompt...")
     products = await fetch_products()
-    catalog_text = format_products_for_prompt(products)
-    logger.info("LLM: System prompt built. Catalog size: %d bytes", len(catalog_text))
+    
+    # Keyword-Based RAG: Filter products based on user message
+    user_words = [word for word in user_message.lower().split() if len(word) >= 3]
+    filtered_products = []
+    
+    for p in products:
+        searchable_text = f"{p.get('name', '')} {p.get('categoryId', '')} {p.get('material', '')}".lower()
+        if any(word in searchable_text for word in user_words):
+            filtered_products.append(p)
+            
+    if not filtered_products:
+        logger.info("LLM: No matching products found for message. Omitting catalog.")
+        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_RULES
+
+    catalog_text = format_products_for_prompt(filtered_products)
+    logger.info("LLM: System prompt built. Catalog size: %d bytes (filtered %d/%d products)", len(catalog_text), len(filtered_products), len(products))
 
     return (
         SYSTEM_PROMPT_BASE
-        + "\n\nKatalog Produk & Harga (dari database toko):\n"
+        + "\n\nKatalog Produk & Harga:\n"
         + catalog_text
+        + "\n"
         + SYSTEM_PROMPT_RULES
     )
 
@@ -99,7 +104,7 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     logger.info("LLM [phone=%s]: Loaded %d history rows.", phone, len(history_rows))
 
     # Build system prompt with live product data
-    system_prompt = await _build_system_prompt()
+    system_prompt = await _build_system_prompt(user_message)
 
     # Convert DB rows to LangChain messages
     messages = [SystemMessage(content=system_prompt)]

@@ -72,44 +72,20 @@ async def fetch_products() -> list[dict]:
 
 
 def format_products_for_prompt(products: list[dict]) -> str:
-    """Format product list into a readable string for the AI system prompt.
-
-    Groups products by category and formats them with price + unit info.
-    """
+    """Format product list into a compressed string to save tokens."""
     if not products:
-        return "Katalog produk sedang tidak tersedia."
+        return "Katalog kosong"
 
-    # Group by category
-    categories: dict[str, list[dict]] = {}
+    lines = ["Kat|Nama|Harga|Bahan|SKU|Stok"]
     for p in products:
-        cat = p.get("categoryId") or "Lainnya"
-        categories.setdefault(cat, []).append(p)
-
-    lines: list[str] = []
-    for cat, items in categories.items():
-        lines.append(f"\n📂 Kategori: {cat}")
-        for i, p in enumerate(items, 1):
-            name = p.get("name", "?")
-            price = p.get("price", 0)
-            unit = p.get("unit", "pcs")
-            material = p.get("material", "")
-            stock = p.get("stock", 0)
-            sku = p.get("sku", "")
-
-            price_str = f"Rp {price:,.0f}".replace(",", ".")
-            line = f"   {i}. {name} — {price_str}/{unit}"
-            if material:
-                line += f" (Bahan: {material})"
-            if sku:
-                line += f" [SKU: {sku}]"
-
-            # Stock info for the AI (not necessarily shared with customer)
-            if stock is not None:
-                if stock <= 0:
-                    line += " ⚠️ STOK HABIS"
-                else:
-                    line += f" [Stok tersedia: {stock}]"
-
-            lines.append(line)
+        cat = p.get("categoryId") or "-"
+        name = p.get("name", "?")
+        price = f"Rp{p.get('price',0):.0f}/{p.get('unit','pcs')}"
+        mat = p.get("material", "") or "-"
+        sku = p.get("sku", "") or "-"
+        stok = p.get("stock", 0)
+        stok_str = "HABIS" if stok is not None and stok <= 0 else str(stok)
+        
+        lines.append(f"{cat}|{name}|{price}|{mat}|{sku}|{stok_str}")
 
     return "\n".join(lines)

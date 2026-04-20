@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+import time
 
 from fastapi import APIRouter, Request
 
@@ -20,6 +21,37 @@ router = APIRouter()
 
 # Track processed message IDs to avoid duplicates
 _processed_ids: set[str] = set()
+
+# Rate limiting state
+RATE_LIMIT_MESSAGES = 5      # Max messages allowed
+RATE_LIMIT_WINDOW = 60       # In seconds
+_user_requests: dict[str, list[float]] = {}
+_warned_users: set[str] = set()
+
+def is_rate_limited(phone: str) -> bool:
+    """Check if a phone number exceeds the allowed rate limit."""
+    now = time.time()
+    reqs = _user_requests.get(phone, [])
+    reqs = [t for t in reqs if now - t < RATE_LIMIT_WINDOW]
+    
+    if len(reqs) >= RATE_LIMIT_MESSAGES:
+        _user_requests[phone] = reqs
+        return True
+        
+    reqs.append(now)
+    _user_requests[phone] = reqs
+    
+    # Reset warning status if they drop below the limit natively (by waiting)
+    if phone in _warned_users:
+        _warned_users.remove(phone)
+        
+    # Prevent unbounded growth periodically implicitly
+    if len(_user_requests) > 5000:
+        _user_requests.clear()
+        _warned_users.clear()
+        
+    return False
+
 
 # ── Incoming messages ────────────────────────────────────────────
 @router.post("/webhook")
@@ -77,6 +109,18 @@ async def receive_message(request: Request):
     _processed_ids.add(msg_id)
     if len(_processed_ids) > 1000:
         _processed_ids.clear()
+        
+    # Rate Limiter
+    if is_rate_limited(sender):
+        logger.warning("Rate limit exceeded for %s", sender)
+        if sender not in _warned_users:
+            _warned_users.add(sender)
+            try:
+                # Send polite warning once until they wait
+                await send_message(sender, "⚠️ Maaf, kamu mengirim pesan terlalu cepat. Sistem AI kami butuh waktu untuk memproses. Mohon tunggu sekitar 1 menit sebelum mengirim pesan lagi ya.")
+            except Exception:
+                pass
+        return {"status": "ok"}
 
     msg_type = payload.get("type", "chat")
     has_media = payload.get("hasMedia", False)
@@ -155,3 +199,4 @@ async def _handle_single_image(phone: str, payload: dict) -> None:
             await send_message(phone, "Maaf, gagal memproses gambar. Coba kirim ulang. 🙏")
         except Exception:
             pass
+
