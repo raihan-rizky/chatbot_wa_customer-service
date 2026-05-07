@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     nebius_vision_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
 
     # ── WAHA (WhatsApp HTTP API) ─────────────────────────────────
-    waha_base_url: str = "http://localhost:3000"
+    waha_base_url: str = "https://pseudolegal-chelsey-tacitly.ngrok-free.dev"
     waha_session: str = "default"
     waha_api_key: str = ""
 
