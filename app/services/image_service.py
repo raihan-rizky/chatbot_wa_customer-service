@@ -71,51 +71,66 @@ async def download_wa_media(phone: str, msg_id: str) -> bytes:
     if settings.waha_api_key:
         headers["X-Api-Key"] = settings.waha_api_key
 
-    logger.info("WAHA Media: Fetching messages for %s to find media", chat_id)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code != 200:
-            logger.error("WAHA Media ERROR: Failed to get messages for %s — HTTP %s", chat_id, resp.status_code)
-            return b""
-        
-        messages = resp.json()
-        target_media_url = None
-        
-        # Look for the message that has Media
-        for msg in messages:
-            if msg.get("hasMedia") and msg.get("media") and msg["media"].get("url"):
-                target_media_url = msg["media"]["url"]
-                # Optionally check if this is the exact message if IDs match
-                # But since ID from payload and ID from API might differ slightly,
-                # we just take the first recent media if msg_id doesn't exactly match.
-                msg_id_in_api = msg.get("id", "")
-                if msg_id in msg_id_in_api:
-                    break
-        
-        if not target_media_url:
-            logger.error("WAHA Media ERROR: No media found in recent messages for msg %s", msg_id)
-            return b""
+    logger.info("WAHA Media: START FETCH [phone=%s, msg_id=%s]", phone, msg_id)
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            logger.info("WAHA Media: Requesting chat history from %s", url)
+            resp = await client.get(url, headers=headers)
             
-        # Download the actual file from the URL found
-        # Usually target_media_url is a fully qualified URL to WAHA's file server.
-        # But if it's localhost and we're inside docker, we might need to replace the base URL.
-        # For safety, if waha_base_url is different from the origin of target_media_url, replace it.
-        if "localhost" in target_media_url or "127.0.0.1" in target_media_url:
-            # Simple replacement if WAHA is running in docker (e.g., http://waha:3000)
-            from urllib.parse import urlparse
-            parsed_media = urlparse(target_media_url)
-            parsed_base = urlparse(settings.waha_base_url)
-            target_media_url = target_media_url.replace(f"{parsed_media.scheme}://{parsed_media.netloc}", f"{parsed_base.scheme}://{parsed_base.netloc}")
+            if resp.status_code != 200:
+                logger.error("WAHA Media ERROR: Failed to get messages [status=%s, body=%s]", resp.status_code, resp.text[:200])
+                return b""
+            
+            messages = resp.json()
+            logger.info("WAHA Media: Retrieved %d messages from history", len(messages))
+            
+            target_media_url = None
+            
+            # Look for the message that has Media
+            for i, msg in enumerate(messages):
+                has_media = msg.get("hasMedia")
+                media_data = msg.get("media")
+                m_id = msg.get("id", "")
+                
+                if has_media and media_data:
+                    found_url = media_data.get("url")
+                    if found_url:
+                        logger.info("WAHA Media: Found media in msg[%d] (id=%s). URL: %s", i, m_id, found_url)
+                        target_media_url = found_url
+                        # If ID matches exactly, we stop immediately
+                        if msg_id in m_id:
+                            logger.info("WAHA Media: Exact msg_id match found at index %d", i)
+                            break
+            
+            if not target_media_url:
+                logger.error("WAHA Media ERROR: No media URL found in recent messages for msg %s", msg_id)
+                return b""
+                
+            # Host correction logic
+            if "localhost" in target_media_url or "127.0.0.1" in target_media_url:
+                from urllib.parse import urlparse
+                parsed_media = urlparse(target_media_url)
+                parsed_base = urlparse(settings.waha_base_url)
+                new_url = target_media_url.replace(
+                    f"{parsed_media.scheme}://{parsed_media.netloc}", 
+                    f"{parsed_base.scheme}://{parsed_base.netloc}"
+                )
+                logger.info("WAHA Media: Applied host correction: %s -> %s", target_media_url, new_url)
+                target_media_url = new_url
 
-        logger.info("WAHA Media: Downloading from URL %s", target_media_url)
-        # Download media file
-        file_resp = await client.get(target_media_url, headers=headers)
-        if file_resp.status_code != 200:
-            logger.error("WAHA Media ERROR: Failed to download media file — HTTP %s", file_resp.status_code)
-            return b""
-            
-        logger.info("WAHA Media SUCCESS: Downloaded %d bytes", len(file_resp.content))
-        return file_resp.content
+            logger.info("WAHA Media: Downloading actual file bytes from %s", target_media_url)
+            file_resp = await client.get(target_media_url, headers=headers)
+            if file_resp.status_code != 200:
+                logger.error("WAHA Media ERROR: Download failed [status=%s]", file_resp.status_code)
+                return b""
+                
+            logger.info("WAHA Media SUCCESS: Downloaded %d bytes", len(file_resp.content))
+            return file_resp.content
+
+    except Exception as e:
+        logger.exception("WAHA Media EXCEPTION: Unexpected error during fetch: %s", str(e))
+        return b""
 
 
 async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:

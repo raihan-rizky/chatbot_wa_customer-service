@@ -79,21 +79,49 @@ async def receive_message(request: Request):
     sender_jid = payload.get("from", "")
 
     # Handle WAHA lid addressing to get real whatsapp number
-    keys_data = payload.get("_data", {}).get("key", {})
+    _data = payload.get("_data") or {}
+    keys_data = _data.get("key") or {}
+    
     if "remoteJidAlt" in keys_data:
-        alt_jid = keys_data["remoteJidAlt"]
+        alt_jid = keys_data["remoteJidAlt"] or ""
         if "@s.whatsapp.net" in alt_jid:
             sender_jid = alt_jid.replace("@s.whatsapp.net", "@c.us")
     elif "remoteJid" in keys_data:
-        remote_jid = keys_data["remoteJid"]
+        remote_jid = keys_data["remoteJid"] or ""
         if "@s.whatsapp.net" in remote_jid:
             sender_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
 
+    sender_jid = sender_jid or ""
     if "@s.whatsapp.net" in sender_jid:
         sender_jid = sender_jid.replace("@s.whatsapp.net", "@c.us")
 
-    # Ignore group messages and status broadcasts
-    if "@g.us" in sender_jid or "status@broadcast" in sender_jid:
+    to_jid = payload.get("to") or ""
+    participant = payload.get("participant") or ""
+    remote_jid = keys_data.get("remoteJid") or ""
+    
+    is_group = (
+        "@g.us" in sender_jid or 
+        "@g.us" in to_jid or 
+        "@g.us" in participant or 
+        "@g.us" in remote_jid or
+        payload.get("isGroup") is True
+    )
+
+    is_broadcast = (
+        "status@broadcast" in sender_jid or
+        "status@broadcast" in to_jid or
+        "status@broadcast" in remote_jid
+    )
+    
+    is_newsletter = (
+        "@newsletter" in sender_jid or
+        "@newsletter" in to_jid or
+        "@newsletter" in remote_jid
+    )
+
+    # Strict check: only process if it's a personal message
+    if is_group or is_broadcast or is_newsletter or not sender_jid.endswith("@c.us"):
+        logger.info("Ignored non-personal message. sender_jid=%s, is_group=%s", sender_jid, is_group)
         return {"status": "ok"}
 
     # Ignore messages sent by the bot itself
