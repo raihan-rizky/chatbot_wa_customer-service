@@ -48,6 +48,7 @@ Jika cocok, berikan informasi produk tersebut seperti harga dan stok (namun JANG
 
 Format Keluaran:
 Gunakan bahasa Indonesia yang santai, ramah, dan profesional layaknya admin WhatsApp.
+Jawab maksimal 3 kalimat saja.
 Gunakan emoji secukupnya. Jawab langsung dalam paragraf rapi tanpa format terstruktur (JSON).
 """
 
@@ -177,4 +178,3 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     except Exception as e:
         logger.exception("Vision LLM ERROR: Vision model call failed. Exception: %s", str(e))
         return "Maaf, saya gagal menganalisa gambar ini. Coba kirim ulang dengan resolusi lebih jelas ya! 🙏"
-
