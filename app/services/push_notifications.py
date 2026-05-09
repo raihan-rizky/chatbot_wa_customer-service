@@ -20,7 +20,7 @@ from app.services.chat_history import count_user_messages, get_history
 
 logger = logging.getLogger(__name__)
 
-PUSH_TABLE = "push_subscriptions"
+PUSH_TABLE = "pos_push_subscriptions"
 EVENT_TABLE = "waha_events"
 NEGOTIATION_TABLE = "negotiations"
 
