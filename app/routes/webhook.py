@@ -16,6 +16,7 @@ from app.services.llm_service import get_ai_response
 from app.services.chat_history import save_message
 from app.services.image_service import analyze_image, download_wa_media
 from app.services.push_notifications import (
+    assistant_response_requests_admin_handoff,
     classify_closing_intent,
     mark_negotiation_closed,
     notify_closing,
@@ -223,6 +224,7 @@ async def receive_message(request: Request):
             text = payload.get("body", "")
             if text:
                 closing_result = await classify_closing_intent(sender, text)
+                closing_detected = closing_result.is_closing
                 if closing_result.is_closing:
                     logger.info(
                         "Closing detected for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
@@ -244,7 +246,43 @@ async def receive_message(request: Request):
                         closing_result.confidence,
                         closing_result.reason,
                     )
-                await _handle_text(sender, text)
+                reply = await _handle_text(sender, text)
+                if (
+                    not closing_detected
+                    and reply
+                    and assistant_response_requests_admin_handoff(reply)
+                ):
+                    logger.info(
+                        "Assistant handoff phrase detected for %s from message %s; forcing closing classifier",
+                        sender,
+                        msg_id,
+                    )
+                    handoff_result = await classify_closing_intent(
+                        sender,
+                        text,
+                        force_trigger="assistant_admin_handoff_phrase",
+                        latest_message_saved=True,
+                    )
+                    if handoff_result.is_closing:
+                        logger.info(
+                            "Closing detected after assistant handoff for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
+                            sender,
+                            msg_id,
+                            handoff_result.trigger,
+                            handoff_result.confidence,
+                            handoff_result.fallback_used,
+                            handoff_result.reason,
+                        )
+                        await mark_negotiation_closed(sender)
+                        await notify_closing(sender, sender, text)
+                    else:
+                        logger.info(
+                            "Assistant handoff classifier did not detect closing for %s from message %s confidence=%.2f reason=%s",
+                            sender,
+                            msg_id,
+                            handoff_result.confidence,
+                            handoff_result.reason,
+                        )
         else:
             logger.info("Skipping unsupported message type: %s", msg_type)
     except Exception:
@@ -253,7 +291,7 @@ async def receive_message(request: Request):
     return {"status": "ok"}
 
 
-async def _handle_text(phone: str, text: str) -> None:
+async def _handle_text(phone: str, text: str) -> str | None:
     """Handle a text message — generate AI reply and save to Supabase."""
     logger.info("Text from %s: %s", phone, text[:80])
 
@@ -263,12 +301,14 @@ async def _handle_text(phone: str, text: str) -> None:
         logger.info("AI reply ready, sending to %s", phone)
         await send_message(phone, reply)
         logger.info("Reply sent to %s", phone)
+        return reply
     except Exception:
         logger.error("Failed to reply to %s:\n%s", phone, traceback.format_exc())
         try:
             await send_message(phone, "Maaf, terjadi kesalahan. Coba kirim ulang pesan kamu. 🙏")
         except Exception:
             pass
+        return None
 
 
 async def _handle_single_image(phone: str, payload: dict) -> None:

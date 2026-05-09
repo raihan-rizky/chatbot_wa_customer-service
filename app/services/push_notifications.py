@@ -110,6 +110,7 @@ PERIODIC_CLASSIFIER_MESSAGE_INTERVAL = 4
 LLM_CLOSING_CONFIDENCE_THRESHOLD = 0.65
 PUSH_RETRY_ATTEMPTS = 2
 PUSH_RETRY_DELAY_SECONDS = 2.0
+ADMIN_HANDOFF_RESPONSE_PHRASE = "admin akan melanjutkan proses di chat ini."
 
 
 @dataclass(frozen=True)
@@ -226,19 +227,33 @@ def _parse_classifier_result(raw_content: Any, trigger: str) -> ClosingClassific
     )
 
 
-async def classify_closing_intent(phone: str, text: str) -> ClosingClassification:
+def assistant_response_requests_admin_handoff(text: str) -> bool:
+    """Return True when the bot response indicates admin handoff for order processing."""
+    return ADMIN_HANDOFF_RESPONSE_PHRASE in _normalize_text(text)
+
+
+async def classify_closing_intent(
+    phone: str,
+    text: str,
+    *,
+    force_trigger: str | None = None,
+    latest_message_saved: bool = False,
+) -> ClosingClassification:
     """Classify whether the latest customer text closes an order/deal."""
     keyword_matches = _matching_closing_keywords(text)
     keyword_gate = bool(keyword_matches)
     history_rows: list[dict[str, Any]] = []
-    user_message_count = await count_user_messages(phone) + 1
+    stored_user_message_count = await count_user_messages(phone)
+    user_message_count = stored_user_message_count if latest_message_saved else stored_user_message_count + 1
 
-    if not keyword_gate:
+    if force_trigger:
+        periodic_gate = False
+    elif not keyword_gate:
         periodic_gate = user_message_count % PERIODIC_CLASSIFIER_MESSAGE_INTERVAL == 0
     else:
         periodic_gate = False
 
-    if not keyword_gate and not periodic_gate:
+    if not force_trigger and not keyword_gate and not periodic_gate:
         logger.info(
             "Closing classifier skipped phone=%s preview=%r keyword_matches=0 customer_message_count=%d",
             phone,
@@ -247,7 +262,7 @@ async def classify_closing_intent(phone: str, text: str) -> ClosingClassificatio
         )
         return ClosingClassification(False, 0.0, "classifier gate skipped", "skipped")
 
-    trigger = "keyword_gate" if keyword_gate else "periodic_4th_message"
+    trigger = force_trigger or ("keyword_gate" if keyword_gate else "periodic_4th_message")
     if not history_rows:
         history_rows = await get_history(phone, limit=CLASSIFIER_HISTORY_LIMIT)
 
