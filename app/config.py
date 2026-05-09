@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # ── App ──────────────────────────────────────────────────────
     max_history_length: int = 20  # max messages kept per user
     max_images_per_request: int = 5  # max images processed per webhook batch
+    rate_limit_messages: int = 5  # general per-user burst limit
+    rate_limit_window_seconds: int = 60  # general rate-limit window
+    stranger_rate_limit_messages: int = 2  # stricter burst limit for low-trust senders
+    stranger_rate_limit_window_seconds: int = 45  # stricter rate-limit window
+    stranger_trust_message_count: int = 2  # messages required before using the general limit
+    abuse_block_threshold: int = 3  # repeated violations before permanent block
+    auto_block_abusive_strangers: bool = True  # escalate repeat abuse into a WAHA block
 
 
 @lru_cache

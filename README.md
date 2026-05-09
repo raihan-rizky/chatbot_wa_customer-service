@@ -11,6 +11,7 @@ This bot acts as a digital customer service assistant for "Toko Teladan Percetak
 - **Design Image Analysis**: Customers can send pictures of their designs (logos, sketches, etc.) and the bot will use `Qwen 2.5 Vision` to analyze it and suggest suitable printing materials and estimates.
 - **Persistent Memory**: Uses Supabase to store chat history, allowing the bot to remember context per customer.
 - **Closing Push Notifications**: Detects deal/closing replies in the WAHA webhook and sends Web Push notifications to stored browser subscriptions.
+- **Anti-Spam Defense**: Applies stricter limits to first-contact senders, records repeated abuse, and can automatically block abusive numbers through WAHA.
 
 ## Prerequisites
 
@@ -35,9 +36,13 @@ This bot acts as a digital customer service assistant for "Toko Teladan Percetak
 3. **Supabase Database**:
    Execute the sql file provided (`sql/create_chat_history.sql`) in your Supabase SQL Editor.
    For closing push notifications, also execute `sql/create_push_notifications.sql`.
+   The anti-spam defense uses the same schema file to create `chat_sender_defense_teladan`.
 
 4. **Web Push**:
    Set `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_SUBJECT`, and `CLOSING_DEAL_PUSH_SECRET` in your environment. Browser subscriptions must be stored in the `push_subscriptions` table by your dashboard/frontend.
+
+5. **Anti-Spam Defense**:
+   The bot rate-limits new senders more aggressively than established customers. Repeat abuse is stored in Supabase and, when enabled, the number is blocked in WAHA.
 
 ## Run Locally
 

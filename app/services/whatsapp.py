@@ -56,3 +56,26 @@ async def send_message(to: str, body: str) -> None:
         logger.info("Message sent to %s", to)
 
 
+async def block_contact(contact_id: str) -> None:
+    """Block a WhatsApp contact via WAHA."""
+    settings = get_settings()
+    url = f"{settings.waha_base_url}/api/contacts/block"
+    payload = {
+        "contactId": contact_id if "@" in contact_id else f"{contact_id}@c.us",
+        "session": settings.waha_session,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(url, headers=_get_headers(settings), json=payload)
+
+        if response.status_code not in (200, 201):
+            logger.error(
+                "Failed to block WA contact %s — %s %s",
+                contact_id,
+                response.status_code,
+                response.text,
+            )
+            response.raise_for_status()
+
+        logger.info("Blocked contact %s", contact_id)
+

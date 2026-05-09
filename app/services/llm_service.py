@@ -37,6 +37,10 @@ SYSTEM_PROMPT_RULES = (
     "- Order khusus/partai besar/tak tahu harga -> catat kebutuhan pelanggan di chat ini; jika detail kurang, minta produk, ukuran, jumlah, bahan, dan deadline.\n"
     "- STOK 0 -> tawarkan opsi lain.\n"
     "- DILARANG sebut 'costPrice'/modal.\n"
+    "- DILARANG menanyakan alamat pelanggan karena tidak ada layanan pengiriman (delivery).\n"
+    "- Sesekali (sekitar 20-30% dari waktu) gunakan pantun lucu atau ramah di akhir jawaban agar percakapan terasa natural.\n"
+    "  Contoh Lucu: 'Ikan hiu makan tomat, Ikan hiu lagi diet. Barang kami kualitas hemat, Bikin dompet nggak kaget.'\n"
+    "  Contoh Cetak: 'Makan sate di pinggir empang, Satenya sate kelinci. Cetak banner janganlah bimbang, Hasil mantap, harga bikin happy.'\n"
     "Alur: 1.Tanya 2.Estimasi 3.Desain 4.DP/Lunas 5.Proses."
 )
 
@@ -52,9 +56,9 @@ def _get_llm() -> ChatNebius:
         _llm = ChatNebius(
             api_key=settings.nebius_api_key,
             model=settings.nebius_model,
-            temperature=0.3,
-            top_p=0.95,
-            max_tokens=1024,
+            temperature=0.4,
+            top_p=0.90,
+            max_tokens=512,
         )
     return _llm
 
@@ -124,7 +128,12 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             if i == len(history_rows) - 1:
                 pantun_instruction = ""
                 if is_first_chat:
-                    pantun_instruction = "Since this is the customer's first message, add a short, friendly pantun about stationery, printing, or Toko Teladan at the end of your response.\n"
+                    pantun_instruction = (
+                        "Since this is the customer's first message, add a short, friendly pantun about stationery, printing, or Toko Teladan at the end of your response. "
+                        "Examples:\n"
+                        "1. Pergi ke pasar beli kelapa, Kelapa diparut untuk santan. Butuh pulpen atau buku apa, Cari di Toko Teladan.\n"
+                        "2. Bunga mawar warnanya merah, Harum baunya di pagi hari. Cetak banner hasil yang cerah, Layanan kami siap melayani.\n"
+                    )
 
                 sandwich_content = (
                     "=== BEGIN USER INPUT ===\n"

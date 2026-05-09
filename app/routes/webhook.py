@@ -12,8 +12,9 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.services.abuse_control import get_sender_defense, mark_blocked, record_abuse
 from app.services.llm_service import get_ai_response
-from app.services.chat_history import save_message
+from app.services.chat_history import count_user_messages, save_message
 from app.services.image_service import analyze_image, download_wa_media
 from app.services.push_notifications import (
     assistant_response_requests_admin_handoff,
@@ -23,7 +24,7 @@ from app.services.push_notifications import (
     notify_closing_deal,
     save_waha_event,
 )
-from app.services.whatsapp import send_message
+from app.services.whatsapp import block_contact, send_message
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,9 @@ router = APIRouter()
 _processed_ids: set[str] = set()
 
 # Rate limiting state
-RATE_LIMIT_MESSAGES = 5      # Max messages allowed
-RATE_LIMIT_WINDOW = 60       # In seconds
 _user_requests: dict[str, list[float]] = {}
 _warned_users: set[str] = set()
+_blocked_users: set[str] = set()
 
 
 class ClosingDealPushRequest(BaseModel):
@@ -63,29 +63,48 @@ def _require_closing_deal_push_auth(authorization: str | None) -> None:
     if not hmac.compare_digest(token, settings.closing_deal_push_secret):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
 
-def is_rate_limited(phone: str) -> bool:
+def is_rate_limited(phone: str, *, max_messages: int, window_seconds: int) -> bool:
     """Check if a phone number exceeds the allowed rate limit."""
     now = time.time()
     reqs = _user_requests.get(phone, [])
-    reqs = [t for t in reqs if now - t < RATE_LIMIT_WINDOW]
-    
-    if len(reqs) >= RATE_LIMIT_MESSAGES:
+    reqs = [t for t in reqs if now - t < window_seconds]
+
+    if len(reqs) >= max_messages:
         _user_requests[phone] = reqs
         return True
-        
+
     reqs.append(now)
     _user_requests[phone] = reqs
-    
+
     # Reset warning status if they drop below the limit natively (by waiting)
     if phone in _warned_users:
         _warned_users.remove(phone)
-        
+
     # Prevent unbounded growth periodically implicitly
     if len(_user_requests) > 5000:
         _user_requests.clear()
         _warned_users.clear()
-        
+
     return False
+
+
+async def _enforce_abuse_block(sender: str, reason: str) -> None:
+    """Persist and apply a hard block to a sender."""
+    if sender in _blocked_users:
+        return
+
+    _blocked_users.add(sender)
+    try:
+        await mark_blocked(sender, reason)
+    except Exception:
+        logger.exception("Failed to persist block state for %s", sender)
+
+    settings = get_settings()
+    if settings.auto_block_abusive_strangers:
+        try:
+            await block_contact(sender)
+        except Exception:
+            logger.exception("Failed to block WAHA contact %s", sender)
 
 
 @router.post("/api/push/closing-deal")
@@ -199,10 +218,58 @@ async def receive_message(request: Request):
     _processed_ids.add(msg_id)
     if len(_processed_ids) > 1000:
         _processed_ids.clear()
-        
+
+    try:
+        defense = await get_sender_defense(sender)
+    except Exception:
+        logger.exception("Failed to load defense state for %s", sender)
+        defense = None
+
+    if defense and defense.get("is_blocked"):
+        logger.warning("Ignoring blocked sender %s", sender)
+        _blocked_users.add(sender)
+        return {"status": "ok"}
+
+    settings = get_settings()
+    try:
+        user_message_count = await count_user_messages(sender)
+    except Exception:
+        logger.exception("Failed to count messages for %s", sender)
+        user_message_count = settings.stranger_trust_message_count
+    is_stranger = user_message_count < settings.stranger_trust_message_count
+    rate_limit_messages = (
+        settings.stranger_rate_limit_messages
+        if is_stranger
+        else settings.rate_limit_messages
+    )
+    rate_limit_window = (
+        settings.stranger_rate_limit_window_seconds
+        if is_stranger
+        else settings.rate_limit_window_seconds
+    )
+
     # Rate Limiter
-    if is_rate_limited(sender):
+    if is_rate_limited(
+        sender,
+        max_messages=rate_limit_messages,
+        window_seconds=rate_limit_window,
+    ):
         logger.warning("Rate limit exceeded for %s", sender)
+        try:
+            abuse = await record_abuse(
+                sender,
+                "rate_limit_exceeded_stranger" if is_stranger else "rate_limit_exceeded",
+            )
+            if abuse["abuse_count"] >= settings.abuse_block_threshold:
+                logger.warning(
+                    "Abuse threshold reached for %s; blocking sender (count=%d)",
+                    sender,
+                    abuse["abuse_count"],
+                )
+                await _enforce_abuse_block(sender, abuse["block_reason"])
+                return {"status": "ok"}
+        except Exception:
+            logger.exception("Failed to record abuse for %s", sender)
         if sender not in _warned_users:
             _warned_users.add(sender)
             try:

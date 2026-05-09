@@ -68,3 +68,26 @@ EXECUTE FUNCTION set_updated_at();
 ALTER TABLE push_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE negotiations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waha_events ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS chat_sender_defense_teladan (
+    phone         VARCHAR(20) PRIMARY KEY,
+    is_blocked    BOOLEAN NOT NULL DEFAULT FALSE,
+    abuse_count   INTEGER NOT NULL DEFAULT 0,
+    last_abuse_at TIMESTAMPTZ,
+    last_seen_at  TIMESTAMPTZ,
+    blocked_at    TIMESTAMPTZ,
+    block_reason  TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_sender_defense_teladan_is_blocked
+    ON chat_sender_defense_teladan (is_blocked);
+
+DROP TRIGGER IF EXISTS trg_chat_sender_defense_teladan_updated_at ON chat_sender_defense_teladan;
+CREATE TRIGGER trg_chat_sender_defense_teladan_updated_at
+BEFORE UPDATE ON chat_sender_defense_teladan
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE chat_sender_defense_teladan ENABLE ROW LEVEL SECURITY;
