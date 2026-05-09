@@ -16,7 +16,7 @@ from app.services.llm_service import get_ai_response
 from app.services.chat_history import save_message
 from app.services.image_service import analyze_image, download_wa_media
 from app.services.push_notifications import (
-    is_closing_text,
+    classify_closing_intent,
     mark_negotiation_closed,
     notify_closing,
     notify_closing_deal,
@@ -222,10 +222,28 @@ async def receive_message(request: Request):
         elif msg_type == "chat":
             text = payload.get("body", "")
             if text:
-                if is_closing_text(text):
-                    logger.info("Closing detected for %s from message %s", sender, msg_id)
+                closing_result = await classify_closing_intent(sender, text)
+                if closing_result.is_closing:
+                    logger.info(
+                        "Closing detected for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
+                        sender,
+                        msg_id,
+                        closing_result.trigger,
+                        closing_result.confidence,
+                        closing_result.fallback_used,
+                        closing_result.reason,
+                    )
                     await mark_negotiation_closed(sender)
                     await notify_closing(sender, sender, text)
+                else:
+                    logger.info(
+                        "Closing not detected for %s from message %s trigger=%s confidence=%.2f reason=%s",
+                        sender,
+                        msg_id,
+                        closing_result.trigger,
+                        closing_result.confidence,
+                        closing_result.reason,
+                    )
                 await _handle_text(sender, text)
         else:
             logger.info("Skipping unsupported message type: %s", msg_type)

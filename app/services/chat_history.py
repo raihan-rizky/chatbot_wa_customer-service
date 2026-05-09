@@ -89,6 +89,31 @@ async def get_history(phone: str, limit: int = 20) -> list[dict]:
         return messages
 
 
+async def count_user_messages(phone: str) -> int:
+    """Return the number of stored customer messages for a phone number."""
+    params = {
+        "phone": f"eq.{phone}",
+        "role": "eq.user",
+        "select": "id",
+        "limit": "1",
+    }
+    headers = _headers()
+    headers["Prefer"] = "count=exact"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(_base_url(), headers=headers, params=params)
+        if resp.status_code >= 400:
+            logger.error("Supabase count failed: %s %s", resp.status_code, resp.text)
+            return 0
+
+        content_range = resp.headers.get("content-range", "")
+        try:
+            return int(content_range.rsplit("/", 1)[1])
+        except (IndexError, ValueError):
+            logger.warning("Supabase count response missing Content-Range: %s", content_range)
+            return 0
+
+
 async def clear_history(phone: str) -> None:
     """Delete all messages for a phone number."""
     params = {"phone": f"eq.{phone}"}
