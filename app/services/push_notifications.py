@@ -388,7 +388,7 @@ async def notify_closing(chat_id: str, phone: str, text: str) -> None:
         {
             "title": "Closing berhasil",
             "body": f"Pembeli {phone} setuju/deal. Cek chat untuk lanjut proses.",
-            "url": f"/dashboard/deals?chat_id={chat_id}",
+            "url": f"/wa/chat_id={chat_id}",
             "chat_id": chat_id,
             "phone": phone,
             "message": text[:200],
