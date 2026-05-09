@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import traceback
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.services.llm_service import get_ai_response
 from app.services.chat_history import save_message
 from app.services.image_service import analyze_image, download_wa_media
+from app.services.push_notifications import (
+    is_closing_text,
+    mark_negotiation_closed,
+    notify_closing,
+    notify_closing_deal,
+    save_waha_event,
+)
 from app.services.whatsapp import send_message
 
 logger = logging.getLogger(__name__)
@@ -27,6 +36,31 @@ RATE_LIMIT_MESSAGES = 5      # Max messages allowed
 RATE_LIMIT_WINDOW = 60       # In seconds
 _user_requests: dict[str, list[float]] = {}
 _warned_users: set[str] = set()
+
+
+class ClosingDealPushRequest(BaseModel):
+    customerName: str = Field(..., min_length=1, max_length=120)
+    chatId: str = Field(..., min_length=1, max_length=120)
+    amount: float | int | None = Field(default=None, ge=0)
+    message: str = Field(..., min_length=1, max_length=500)
+    url: str = Field(default="/wa", min_length=1, max_length=300)
+
+
+def _require_closing_deal_push_auth(authorization: str | None) -> None:
+    settings = get_settings()
+    if not settings.closing_deal_push_secret:
+        logger.error("CLOSING_DEAL_PUSH_SECRET is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Closing deal push endpoint is not configured",
+        )
+
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required")
+
+    if not hmac.compare_digest(token, settings.closing_deal_push_secret):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
 
 def is_rate_limited(phone: str) -> bool:
     """Check if a phone number exceeds the allowed rate limit."""
@@ -51,6 +85,31 @@ def is_rate_limited(phone: str) -> bool:
         _warned_users.clear()
         
     return False
+
+
+@router.post("/api/push/closing-deal")
+async def push_closing_deal(
+    payload: ClosingDealPushRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Receive closed deal notifications from an external WAHA/POS workflow."""
+    _require_closing_deal_push_auth(authorization)
+
+    chat_id = payload.chatId.strip()
+    customer_name = payload.customerName.strip()
+    message = payload.message.strip()
+    url = payload.url.strip() or "/wa"
+
+    await mark_negotiation_closed(chat_id, customer_name)
+    await notify_closing_deal(
+        chat_id=chat_id,
+        customer_name=customer_name,
+        amount=payload.amount,
+        message=message,
+        url=url,
+    )
+
+    return {"status": "ok"}
 
 
 # ── Incoming messages ────────────────────────────────────────────
@@ -130,6 +189,8 @@ async def receive_message(request: Request):
 
     sender = sender_jid.replace("@c.us", "")
 
+    await save_waha_event(event, sender, msg_id, payload)
+
     # Deduplicate
     if msg_id in _processed_ids:
         logger.info("Skipping duplicate message %s", msg_id)
@@ -161,6 +222,10 @@ async def receive_message(request: Request):
         elif msg_type == "chat":
             text = payload.get("body", "")
             if text:
+                if is_closing_text(text):
+                    logger.info("Closing detected for %s from message %s", sender, msg_id)
+                    await mark_negotiation_closed(sender)
+                    await notify_closing(sender, sender, text)
                 await _handle_text(sender, text)
         else:
             logger.info("Skipping unsupported message type: %s", msg_type)
@@ -227,4 +292,3 @@ async def _handle_single_image(phone: str, payload: dict) -> None:
             await send_message(phone, "Maaf, gagal memproses gambar. Coba kirim ulang. 🙏")
         except Exception:
             pass
-

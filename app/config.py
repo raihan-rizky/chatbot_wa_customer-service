@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_key: str = ""
 
+    # Web Push Notifications
+    vapid_private_key: str = ""
+    vapid_claims_subject: str = "mailto:admin@tokoteladan.local"
+    push_notify_all_subscribers: bool = True
+    closing_deal_push_secret: str = ""
+
     # ── App ──────────────────────────────────────────────────────
     max_history_length: int = 20  # max messages kept per user
     max_images_per_request: int = 5  # max images processed per webhook batch

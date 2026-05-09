@@ -10,6 +10,7 @@ This bot acts as a digital customer service assistant for "Toko Teladan Percetak
 - **Product Catalog Knowledge**: Built-in knowledge of banner, sticker, and stationery prices.
 - **Design Image Analysis**: Customers can send pictures of their designs (logos, sketches, etc.) and the bot will use `Qwen 2.5 Vision` to analyze it and suggest suitable printing materials and estimates.
 - **Persistent Memory**: Uses Supabase to store chat history, allowing the bot to remember context per customer.
+- **Closing Push Notifications**: Detects deal/closing replies in the WAHA webhook and sends Web Push notifications to stored browser subscriptions.
 
 ## Prerequisites
 
@@ -33,6 +34,10 @@ This bot acts as a digital customer service assistant for "Toko Teladan Percetak
 
 3. **Supabase Database**:
    Execute the sql file provided (`sql/create_chat_history.sql`) in your Supabase SQL Editor.
+   For closing push notifications, also execute `sql/create_push_notifications.sql`.
+
+4. **Web Push**:
+   Set `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_SUBJECT`, and `CLOSING_DEAL_PUSH_SECRET` in your environment. Browser subscriptions must be stored in the `push_subscriptions` table by your dashboard/frontend.
 
 ## Run Locally
 
@@ -57,3 +62,21 @@ uvicorn app.main:app --reload --port 8000
 | ------ | ---------- | ---------------------------- |
 | `GET`  | `/`        | Health check                 |
 | `POST` | `/webhook` | Receive incoming WA messages |
+| `POST` | `/api/push/closing-deal` | Receive authenticated closing deal notifications |
+
+### Closing Deal Push
+
+External WAHA/POS workflows can notify this app when a deal closes:
+
+```bash
+curl -X POST "https://your-pos-domain.com/api/push/closing-deal" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CLOSING_DEAL_PUSH_SECRET" \
+  -d '{
+    "customerName": "Budi",
+    "chatId": "628123456789@c.us",
+    "amount": 150000,
+    "message": "Budi closing deal senilai Rp150.000.",
+    "url": "/wa"
+  }'
+```
