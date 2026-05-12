@@ -103,25 +103,6 @@ HIGH_INTENT_CLOSING_PHRASES = (
     "kirim invoice",
 )
 
-SHORT_CONFIRMATION_CLOSINGS = {
-    "acc",
-    "boleh",
-    "deal",
-    "dp",
-    "fix",
-    "gas",
-    "jadi",
-    "lanjut",
-    "lunas",
-    "ok",
-    "oke",
-    "qris",
-    "setuju",
-    "siap",
-    "tf",
-    "transfer",
-}
-
 CLASSIFIER_HISTORY_LIMIT = 12
 PERIODIC_CLASSIFIER_MESSAGE_INTERVAL = 4
 LLM_CLOSING_CONFIDENCE_THRESHOLD = 0.65
