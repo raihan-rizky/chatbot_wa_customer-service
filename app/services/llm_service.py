@@ -200,37 +200,6 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
     return text
 
 
-async def _repair_ai_reply(llm: ChatNebius, bad_reply: object, user_message: str, timeout: float) -> str:
-    """Ask the model once to minimally clean malformed output as a customer-safe WhatsApp reply."""
-    cleaned_draft = _clean_ai_reply_text(bad_reply)
-    repair_source = cleaned_draft or str(bad_reply or "")
-    repair_messages = [
-        SystemMessage(
-            content=(
-                "Anda adalah CS Toko Teladan Percetakan & ATK. "
-                "Tugas Anda adalah MEMBERSIHKAN draft jawaban, bukan menulis ulang dari nol. "
-                "Pertahankan makna, gaya ramah admin WA, sapaan, emoji, pantun/candaan yang wajar, "
-                "harga, jumlah, ukuran, stok, deadline, dan detail produk dari draft. "
-                "Ubah sesedikit mungkin. Hapus hanya token internal, role label, markdown, JSON, "
-                "code fence, kata Continue, atau bagian yang jelas rusak. "
-                "Jika draft masih memiliki jawaban pelanggan yang masuk akal, pakai draft itu sebagai dasar. "
-                "Jangan menambah info baru. Output hanya pesan final untuk pelanggan."
-            )
-        ),
-        HumanMessage(
-            content=(
-                "Pesan pelanggan:\n"
-                f"{user_message}\n\n"
-                "Draft jawaban yang harus dibersihkan dengan minimal edit:\n"
-                f"{repair_source[:1200]}\n\n"
-                "Keluarkan hanya versi bersihnya."
-            )
-        ),
-    ]
-    response = await asyncio.wait_for(llm.ainvoke(repair_messages), timeout=timeout)
-    return _sanitize_ai_reply(response.content)
-
-
 def _log_unusable_ai_reply(error: Exception, phone: str) -> None:
     logger.error(
         "LLM [phone=%s]: Refusing to send unusable/internal-looking reply: %s",
@@ -373,20 +342,7 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             llm.ainvoke(messages),
             timeout=settings.nebius_request_timeout_seconds,
         )
-        try:
-            reply = _sanitize_ai_reply(response.content)
-        except ValueError as sanitize_error:
-            logger.warning(
-                "LLM [phone=%s]: Initial reply failed strict validation; retrying repair once: %s",
-                phone,
-                sanitize_error,
-            )
-            reply = await _repair_ai_reply(
-                llm,
-                response.content,
-                user_message,
-                timeout=min(settings.nebius_request_timeout_seconds, 15.0),
-            )
+        reply = _sanitize_ai_reply(response.content)
         logger.info("LLM [phone=%s]: Response SUCCESS. Reply length: %d chars.", phone, len(str(reply)))
 
         # Save AI reply to Supabase
