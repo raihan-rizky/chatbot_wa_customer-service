@@ -61,7 +61,6 @@ def _get_llm() -> ChatNebius:
             temperature=0.3,
             top_p=0.90,
             max_tokens=256,
-            stop=["###", "User:", "Assistant:", "Customer:"]
         )
     return _llm
 
