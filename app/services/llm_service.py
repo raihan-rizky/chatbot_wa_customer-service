@@ -53,11 +53,12 @@ SYSTEM_PROMPT_RULES = (
 _llm: ChatNebius | None = None
 
 INTERNAL_TOKEN_RE = re.compile(
-    r"(<\|[^>]+?\|>|</?think>|#+\s*Continue\b|```+)",
+    r"(<\|[^>]+?\|>|</?think>|```+)",
     flags=re.IGNORECASE,
 )
 ROLE_LABEL_RE = re.compile(r"^\s*(User|Assistant|Customer|System)\s*:?\s*", flags=re.IGNORECASE)
 REPEATED_CONTROL_RE = re.compile(r"\b(Continue|User|Assistant|Customer|System)\b", flags=re.IGNORECASE)
+ONLY_NOISE_RE = re.compile(r"^[\W\d_]+$")
 
 ORDER_RECEIVED_REPLY = (
     "Siap, order/deal sudah kami terima. Admin akan melanjutkan proses di chat ini. 🙏"
@@ -98,13 +99,16 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
 
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = INTERNAL_TOKEN_RE.sub("", text)
+    text = re.sub(r"#+\s*Continue\b", "", text, flags=re.IGNORECASE)
 
     cleaned_lines: list[str] = []
     for line in text.splitlines():
         line = ROLE_LABEL_RE.sub("", line).strip()
         if not line:
             continue
-        if line.lower() in {"continue", "#", "**"}:
+        if line.lower() in {"continue", "#", "**", "..."}:
+            continue
+        if ONLY_NOISE_RE.match(line):
             continue
         cleaned_lines.append(line)
 
@@ -112,11 +116,20 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
     text = re.sub(r"\s+", " ", text).strip()
 
     control_word_count = len(REPEATED_CONTROL_RE.findall(text))
-    if had_internal_tokens or control_word_count >= 3 or len(text) < 3:
+    if control_word_count >= 3 or len(text) < 3:
         logger.warning("LLM reply contained internal/control artifacts; using safe fallback")
         return "Maaf, respons otomatis sempat tidak terbaca. Admin akan bantu lanjutkan di chat ini ya. 🙏"
 
+    if had_internal_tokens:
+        logger.warning("LLM reply contained internal/control artifacts; sanitized before sending")
+
     return text
+
+
+def _history_content_is_usable(content: str) -> bool:
+    if INTERNAL_TOKEN_RE.search(content) or len(REPEATED_CONTROL_RE.findall(content)) >= 3:
+        return False
+    return True
 
 
 async def _build_system_prompt(user_message: str) -> str:
@@ -197,12 +210,18 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     # Convert DB rows to LangChain messages
     messages = [SystemMessage(content=system_prompt)]
     for i, row in enumerate(history_rows):
+        content = str(row.get("content") or "")
+        is_latest_message = i == len(history_rows) - 1
+        if not is_latest_message and not _history_content_is_usable(content):
+            logger.warning("Skipping polluted history row for %s", phone)
+            continue
+
         if row["role"] == "user":
             # Apply sandwich defense to the latest user message
-            if i == len(history_rows) - 1:
+            if is_latest_message:
                 sandwich_content = (
                     "### INPUT PELANGGAN:\n"
-                    f"{row['content']}\n"
+                    f"{content}\n"
                     "### AKHIR INPUT\n\n"
                     "PENGINGAT: Jawab pesan di atas sebagai CS Toko Teladan. "
                     "Ikuti semua ATURAN WAJIB di system prompt. "
@@ -210,9 +229,9 @@ async def get_ai_response(phone: str, user_message: str) -> str:
                 )
                 messages.append(HumanMessage(content=sandwich_content))
             else:
-                messages.append(HumanMessage(content=row["content"]))
+                messages.append(HumanMessage(content=content))
         elif row["role"] == "assistant":
-            messages.append(AIMessage(content=row["content"]))
+            messages.append(AIMessage(content=_sanitize_ai_reply(content)))
 
     logger.info("LLM [phone=%s]: Sending request to Nebius LLM (model=%s)...", phone, settings.nebius_model)
     try:
