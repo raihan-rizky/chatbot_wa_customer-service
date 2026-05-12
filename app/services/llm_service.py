@@ -59,6 +59,8 @@ INTERNAL_TOKEN_RE = re.compile(
 ROLE_LABEL_RE = re.compile(r"^\s*(User|Assistant|Customer|System)\s*:?\s*", flags=re.IGNORECASE)
 REPEATED_CONTROL_RE = re.compile(r"\b(Continue|User|Assistant|Customer|System)\b", flags=re.IGNORECASE)
 ONLY_NOISE_RE = re.compile(r"^[\W\d_]+$")
+MIN_USABLE_REPLY_CHARS = 12
+MAX_CONTROL_WORDS_AFTER_CLEANING = 1
 
 ORDER_RECEIVED_REPLY = (
     "Siap, order/deal sudah kami terima. Admin akan melanjutkan proses di chat ini. 🙏"
@@ -95,7 +97,6 @@ def _get_llm() -> ChatNebius:
 def _sanitize_ai_reply(raw_reply: object) -> str:
     """Remove model control artifacts before replies reach WhatsApp/history."""
     text = str(raw_reply or "").strip()
-    had_internal_tokens = bool(INTERNAL_TOKEN_RE.search(text))
 
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = INTERNAL_TOKEN_RE.sub("", text)
@@ -116,12 +117,26 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
     text = re.sub(r"\s+", " ", text).strip()
 
     control_word_count = len(REPEATED_CONTROL_RE.findall(text))
-    if control_word_count >= 3 or len(text) < 3:
-        logger.warning("LLM reply contained internal/control artifacts; using safe fallback")
-        return "Maaf, respons otomatis sempat tidak terbaca. Admin akan bantu lanjutkan di chat ini ya. 🙏"
+    has_internal_tokens_after_cleaning = bool(INTERNAL_TOKEN_RE.search(text))
+    is_too_short = len(text) < MIN_USABLE_REPLY_CHARS
+    has_too_many_control_words = control_word_count > MAX_CONTROL_WORDS_AFTER_CLEANING
+    is_noise_only = bool(text) and bool(ONLY_NOISE_RE.match(text))
 
-    if had_internal_tokens:
-        logger.warning("LLM reply contained internal/control artifacts; sanitized before sending")
+    if (
+        has_internal_tokens_after_cleaning
+        or is_too_short
+        or has_too_many_control_words
+        or is_noise_only
+    ):
+        logger.warning(
+            "LLM reply unusable after sanitizing; using safe fallback "
+            "(chars=%d control_words=%d internal_tokens=%s noise_only=%s)",
+            len(text),
+            control_word_count,
+            has_internal_tokens_after_cleaning,
+            is_noise_only,
+        )
+        return "Maaf, respons otomatis sempat tidak terbaca. Admin akan bantu lanjutkan di chat ini ya. 🙏"
 
     return text
 
