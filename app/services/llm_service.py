@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_nebius import ChatNebius
@@ -11,6 +12,7 @@ from langchain_nebius import ChatNebius
 from app.config import get_settings
 from app.services.chat_history import save_message, get_history
 from app.services.product_service import fetch_matching_products, format_products_for_prompt
+from app.services.push_notifications import is_fast_closing_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ SYSTEM_PROMPT_RULES = (
     "- Jawab sesingkat mungkin. Maksimal 2-3 kalimat.\n"
     "- Langsung berikan harga atau info tanpa basa-basi.\n"
     "- DILARANG menuliskan label peran seperti 'User:', 'Assistant:', atau menampilkan proses berpikir internal Anda.\n"
+    "- DILARANG menulis token internal seperti <|channel|>, <|message|>, <think>, markdown fence, JSON, atau kata 'Continue'.\n"
     "- Ramah, 1-2 emoji.\n"
     "- Gambar/desain: deskripsikan, beri saran & estimasi.\n"
     "- Jika pelanggan ingin deal/order/lanjut/DP/lunas, jangan arahkan ke nomor lain.\n"
@@ -49,6 +52,17 @@ SYSTEM_PROMPT_RULES = (
 # ── Lazy-initialised LLM instance ───────────────────────────────
 _llm: ChatNebius | None = None
 
+INTERNAL_TOKEN_RE = re.compile(
+    r"(<\|[^>]+?\|>|</?think>|#+\s*Continue\b|```+)",
+    flags=re.IGNORECASE,
+)
+ROLE_LABEL_RE = re.compile(r"^\s*(User|Assistant|Customer|System)\s*:?\s*", flags=re.IGNORECASE)
+REPEATED_CONTROL_RE = re.compile(r"\b(Continue|User|Assistant|Customer|System)\b", flags=re.IGNORECASE)
+
+ORDER_RECEIVED_REPLY = (
+    "Siap, order/deal sudah kami terima. Admin akan melanjutkan proses di chat ini. 🙏"
+)
+
 
 def _get_llm() -> ChatNebius:
     """Return (and cache) the ChatNebius instance."""
@@ -61,9 +75,48 @@ def _get_llm() -> ChatNebius:
             temperature=0.3,
             top_p=0.90,
             max_tokens=256,
-            stop=["###", "User:", "Assistant:", "Customer:"]
+            stop=[
+                "###",
+                "User:",
+                "Assistant:",
+                "Customer:",
+                "System:",
+                "<|channel|>",
+                "<|message|>",
+                "<|im_start|>",
+                "<think>",
+                "```",
+            ],
         )
     return _llm
+
+
+def _sanitize_ai_reply(raw_reply: object) -> str:
+    """Remove model control artifacts before replies reach WhatsApp/history."""
+    text = str(raw_reply or "").strip()
+    had_internal_tokens = bool(INTERNAL_TOKEN_RE.search(text))
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = INTERNAL_TOKEN_RE.sub("", text)
+
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        line = ROLE_LABEL_RE.sub("", line).strip()
+        if not line:
+            continue
+        if line.lower() in {"continue", "#", "**"}:
+            continue
+        cleaned_lines.append(line)
+
+    text = " ".join(cleaned_lines)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    control_word_count = len(REPEATED_CONTROL_RE.findall(text))
+    if had_internal_tokens or control_word_count >= 3 or len(text) < 3:
+        logger.warning("LLM reply contained internal/control artifacts; using safe fallback")
+        return "Maaf, respons otomatis sempat tidak terbaca. Admin akan bantu lanjutkan di chat ini ya. 🙏"
+
+    return text
 
 
 async def _build_system_prompt(user_message: str) -> str:
@@ -104,6 +157,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     logger.info("LLM [phone=%s]: Starting response generation...", phone)
     llm = _get_llm()
     settings = get_settings()
+
+    if is_fast_closing_confirmation(user_message):
+        logger.info("LLM [phone=%s]: Closing confirmation; using deterministic reply", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", ORDER_RECEIVED_REPLY),
+            return_exceptions=True,
+        )
+        return ORDER_RECEIVED_REPLY
 
     # Load previous history and persist the new message concurrently.
     history_limit = max(settings.max_history_length - 1, 0)
@@ -158,7 +220,7 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             llm.ainvoke(messages),
             timeout=settings.nebius_request_timeout_seconds,
         )
-        reply = response.content
+        reply = _sanitize_ai_reply(response.content)
         logger.info("LLM [phone=%s]: Response SUCCESS. Reply length: %d chars.", phone, len(str(reply)))
 
         # Save AI reply to Supabase

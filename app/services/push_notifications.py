@@ -103,6 +103,25 @@ HIGH_INTENT_CLOSING_PHRASES = (
     "kirim invoice",
 )
 
+SHORT_CONFIRMATION_CLOSINGS = {
+    "acc",
+    "boleh",
+    "deal",
+    "dp",
+    "fix",
+    "gas",
+    "jadi",
+    "lanjut",
+    "lunas",
+    "ok",
+    "oke",
+    "qris",
+    "setuju",
+    "siap",
+    "tf",
+    "transfer",
+}
+
 CLASSIFIER_HISTORY_LIMIT = 12
 PERIODIC_CLASSIFIER_MESSAGE_INTERVAL = 4
 LLM_CLOSING_CONFIDENCE_THRESHOLD = 0.65
@@ -189,6 +208,20 @@ def _matching_closing_keywords(text: str) -> list[str]:
 def _has_high_intent_closing_phrase(text: str) -> bool:
     normalized = _normalize_text(text)
     return any(_contains_phrase(normalized, phrase) for phrase in HIGH_INTENT_CLOSING_PHRASES)
+
+
+def has_high_intent_closing_phrase(text: str) -> bool:
+    """Return True for buyer messages that clearly close or confirm an order."""
+    return _has_high_intent_closing_phrase(text)
+
+
+def is_fast_closing_confirmation(text: str) -> bool:
+    """Return True for short customer confirmations that should not need LLM generation."""
+    normalized = _normalize_text(text)
+    words = normalized.split()
+    if len(words) <= 3 and normalized in SHORT_CONFIRMATION_CLOSINGS:
+        return True
+    return _has_high_intent_closing_phrase(text)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
