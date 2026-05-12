@@ -29,8 +29,6 @@ SYSTEM_PROMPT_RULES = (
     "- Jawab sesingkat mungkin. Maksimal 2-3 kalimat.\n"
     "- Langsung berikan harga atau info tanpa basa-basi.\n"
     "- DILARANG menuliskan label peran seperti 'User:', 'Assistant:', atau menampilkan proses berpikir internal Anda.\n"
-    "- DILARANG menulis token internal seperti <|channel|>, <|message|>, <think>, markdown fence, JSON, atau kata 'Continue'.\n"
-    "- Output hanya isi pesan final untuk pelanggan WhatsApp. Jangan awali dengan metadata, format chat, role, atau penjelasan sistem.\n"
     "- Ramah, 1-2 emoji.\n"
     "- Gambar/desain: deskripsikan, beri saran & estimasi.\n"
     "- Jika pelanggan ingin deal/order/lanjut/DP/lunas, jangan arahkan ke nomor lain.\n"
@@ -107,64 +105,6 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     llm = _get_llm()
     settings = get_settings()
 
-    if is_fast_closing_confirmation(user_message):
-        logger.info("LLM [phone=%s]: Closing confirmation; using deterministic reply", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", ORDER_RECEIVED_REPLY),
-            return_exceptions=True,
-        )
-        return ORDER_RECEIVED_REPLY
-
-    if _is_simple_greeting(user_message):
-        greeting_reply = (
-            "Halo, Toko Teladan Percetakan & ATK di sini. Mau tanya produk, harga, stok, "
-            "atau estimasi cetak apa? 😊"
-        )
-        logger.info("LLM [phone=%s]: Simple greeting; using deterministic reply", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", greeting_reply),
-            return_exceptions=True,
-        )
-        return greeting_reply
-
-    if _is_albatros_banner_question(user_message):
-        logger.info("LLM [phone=%s]: Albatros banner question; using deterministic reply", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", ALBATROS_BANNER_REPLY),
-            return_exceptions=True,
-        )
-        return ALBATROS_BANNER_REPLY
-
-    if _is_banner_order_intent(user_message):
-        logger.info("LLM [phone=%s]: Banner order intent; asking for banner details", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", BANNER_DETAIL_REPLY),
-            return_exceptions=True,
-        )
-        return BANNER_DETAIL_REPLY
-
-    if _is_identity_question(user_message):
-        logger.info("LLM [phone=%s]: Identity question; using deterministic reply", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", IDENTITY_REPLY),
-            return_exceptions=True,
-        )
-        return IDENTITY_REPLY
-
-    if _is_generic_buy_intent(user_message):
-        logger.info("LLM [phone=%s]: Generic buy intent; asking for product details", phone)
-        await asyncio.gather(
-            save_message(phone, "user", user_message),
-            save_message(phone, "assistant", BUY_INTENT_NEEDS_DETAIL_REPLY),
-            return_exceptions=True,
-        )
-        return BUY_INTENT_NEEDS_DETAIL_REPLY
-
     # Load previous history and persist the new message concurrently.
     history_limit = max(settings.max_history_length - 1, 0)
     logger.info("LLM [phone=%s]: Saving user message and loading history (limit=%d)...", phone, history_limit)
@@ -195,18 +135,12 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     # Convert DB rows to LangChain messages
     messages = [SystemMessage(content=system_prompt)]
     for i, row in enumerate(history_rows):
-        content = str(row.get("content") or "")
-        is_latest_message = i == len(history_rows) - 1
-        if not is_latest_message and not _history_content_is_usable(content):
-            logger.warning("Skipping polluted history row for %s", phone)
-            continue
-
         if row["role"] == "user":
             # Apply sandwich defense to the latest user message
-            if is_latest_message:
+            if i == len(history_rows) - 1:
                 sandwich_content = (
                     "### INPUT PELANGGAN:\n"
-                    f"{content}\n"
+                    f"{row['content']}\n"
                     "### AKHIR INPUT\n\n"
                     "PENGINGAT: Jawab pesan di atas sebagai CS Toko Teladan. "
                     "Ikuti semua ATURAN WAJIB di system prompt. "
@@ -214,9 +148,9 @@ async def get_ai_response(phone: str, user_message: str) -> str:
                 )
                 messages.append(HumanMessage(content=sandwich_content))
             else:
-                messages.append(HumanMessage(content=content))
+                messages.append(HumanMessage(content=row["content"]))
         elif row["role"] == "assistant":
-            messages.append(AIMessage(content=_sanitize_ai_reply(content)))
+            messages.append(AIMessage(content=row["content"]))
 
     logger.info("LLM [phone=%s]: Sending request to Nebius LLM (model=%s)...", phone, settings.nebius_model)
     try:
@@ -239,9 +173,6 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             settings.nebius_request_timeout_seconds,
         )
         return "Maaf, respons AI sedang lambat. Admin akan bantu lanjutkan di chat ini ya. 🙏"
-    except ValueError as e:
-        _log_unusable_ai_reply(e, phone)
-        raise
     except Exception as e:
         logger.exception("LLM [phone=%s]: ERROR calling Nebius LLM. Exception: %s", phone, str(e))
         return "Sorry, I'm having trouble thinking right now. Please try again in a moment. 🙏"
