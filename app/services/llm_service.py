@@ -60,6 +60,11 @@ INTERNAL_TOKEN_RE = re.compile(
 ROLE_LABEL_RE = re.compile(r"^\s*(User|Assistant|Customer|System)\s*:?\s*", flags=re.IGNORECASE)
 REPEATED_CONTROL_RE = re.compile(r"\b(Continue|User|Assistant|Customer|System)\b", flags=re.IGNORECASE)
 ONLY_NOISE_RE = re.compile(r"^[\W\d_]+$")
+STRUCTURED_ARTIFACT_RE = re.compile(
+    r"(\{\s*['\"]?(type|role|content|channel|message)['\"]?\s*:|\[\s*\{|\}\s*,\s*\{)",
+    flags=re.IGNORECASE,
+)
+JSON_KEY_RE = re.compile(r"['\"]?(type|role|content|channel|message)['\"]?\s*:", flags=re.IGNORECASE)
 MIN_USABLE_REPLY_CHARS = 12
 MAX_CONTROL_WORDS_AFTER_CLEANING = 1
 
@@ -68,6 +73,9 @@ ORDER_RECEIVED_REPLY = (
 )
 BUY_INTENT_NEEDS_DETAIL_REPLY = (
     "Siap kak, mau beli produk apa? Sebutkan nama barang atau kebutuhan cetaknya, nanti kami bantu cek harga dan stok. 😊"
+)
+BANNER_DETAIL_REPLY = (
+    "Siap kak, untuk banner/spanduk bisa. Tolong kirim ukuran, jumlah, bahan kalau sudah ada, dan deadline-nya ya; nanti kami bantu estimasi harga. 😊"
 )
 
 
@@ -162,6 +170,14 @@ def _is_generic_buy_intent(message: str) -> bool:
     )
 
 
+def _is_banner_order_intent(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", message.lower())
+    words = set(normalized.split())
+    banner_words = {"banner", "spanduk", "baliho", "umbul"}
+    intent_words = {"beli", "buy", "cetak", "print", "order", "pesan", "mesen", "mau", "mw"}
+    return bool(words & banner_words) and bool(words & intent_words)
+
+
 def _clean_ai_reply_text(raw_reply: object) -> str:
     """Remove obvious model control artifacts without deciding if the reply is valid."""
     text = str(raw_reply or "").strip()
@@ -194,17 +210,25 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
     is_too_short = len(text) < MIN_USABLE_REPLY_CHARS
     has_too_many_control_words = control_word_count > MAX_CONTROL_WORDS_AFTER_CLEANING
     is_noise_only = bool(text) and bool(ONLY_NOISE_RE.match(text))
+    has_structured_artifacts = bool(STRUCTURED_ARTIFACT_RE.search(text))
+    structured_key_count = len(JSON_KEY_RE.findall(text))
+    starts_like_structured_data = text[:1] in {"{", "["}
 
     if (
         has_internal_tokens_after_cleaning
         or is_too_short
         or has_too_many_control_words
         or is_noise_only
+        or has_structured_artifacts
+        or structured_key_count >= 2
+        or starts_like_structured_data
     ):
         raise ValueError(
             "LLM reply unusable after sanitizing "
             f"(chars={len(text)} control_words={control_word_count} "
-            f"internal_tokens={has_internal_tokens_after_cleaning} noise_only={is_noise_only})"
+            f"internal_tokens={has_internal_tokens_after_cleaning} noise_only={is_noise_only} "
+            f"structured_artifacts={has_structured_artifacts} structured_keys={structured_key_count} "
+            f"starts_structured={starts_like_structured_data})"
         )
 
     return text
@@ -218,7 +242,12 @@ def _log_unusable_ai_reply(error: Exception, phone: str) -> None:
     )
 
 def _history_content_is_usable(content: str) -> bool:
-    if INTERNAL_TOKEN_RE.search(content) or len(REPEATED_CONTROL_RE.findall(content)) >= 3:
+    if (
+        INTERNAL_TOKEN_RE.search(content)
+        or len(REPEATED_CONTROL_RE.findall(content)) >= 3
+        or STRUCTURED_ARTIFACT_RE.search(content)
+        or len(JSON_KEY_RE.findall(content)) >= 2
+    ):
         return False
     return True
 
@@ -283,6 +312,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             return_exceptions=True,
         )
         return greeting_reply
+
+    if _is_banner_order_intent(user_message):
+        logger.info("LLM [phone=%s]: Banner order intent; asking for banner details", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", BANNER_DETAIL_REPLY),
+            return_exceptions=True,
+        )
+        return BANNER_DETAIL_REPLY
 
     if _is_generic_buy_intent(user_message):
         logger.info("LLM [phone=%s]: Generic buy intent; asking for product details", phone)
