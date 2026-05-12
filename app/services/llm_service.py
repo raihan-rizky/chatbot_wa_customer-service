@@ -66,6 +66,9 @@ MAX_CONTROL_WORDS_AFTER_CLEANING = 1
 ORDER_RECEIVED_REPLY = (
     "Siap, order/deal sudah kami terima. Admin akan melanjutkan proses di chat ini. 🙏"
 )
+BUY_INTENT_NEEDS_DETAIL_REPLY = (
+    "Siap kak, mau beli produk apa? Sebutkan nama barang atau kebutuhan cetaknya, nanti kami bantu cek harga dan stok. 😊"
+)
 
 
 def _get_llm() -> ChatNebius:
@@ -117,8 +120,40 @@ def _is_simple_greeting(message: str) -> bool:
     )
 
 
-def _sanitize_ai_reply(raw_reply: object) -> str:
-    """Remove model control artifacts before replies reach WhatsApp/history."""
+def _is_generic_buy_intent(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", message.lower())
+    words = [word for word in normalized.split() if word]
+    if not words or len(words) > 8:
+        return False
+
+    buy_words = {"beli", "buy", "order", "pesan", "mau", "mw"}
+    filler_words = {
+        "admin",
+        "assalam",
+        "assalamualaikum",
+        "hai",
+        "halo",
+        "haloo",
+        "hallo",
+        "hello",
+        "hehe",
+        "hi",
+        "hii",
+        "hiii",
+        "kak",
+        "min",
+        "mas",
+        "mbak",
+        "pak",
+        "buk",
+    }
+    return any(word in buy_words for word in words) and all(
+        word in buy_words or word in filler_words for word in words
+    )
+
+
+def _clean_ai_reply_text(raw_reply: object) -> str:
+    """Remove obvious model control artifacts without deciding if the reply is valid."""
     text = str(raw_reply or "").strip()
 
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
@@ -137,7 +172,12 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
         cleaned_lines.append(line)
 
     text = " ".join(cleaned_lines)
-    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sanitize_ai_reply(raw_reply: object) -> str:
+    """Remove model control artifacts before replies reach WhatsApp/history."""
+    text = _clean_ai_reply_text(raw_reply)
 
     control_word_count = len(REPEATED_CONTROL_RE.findall(text))
     has_internal_tokens_after_cleaning = bool(INTERNAL_TOKEN_RE.search(text))
@@ -161,23 +201,29 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
 
 
 async def _repair_ai_reply(llm: ChatNebius, bad_reply: object, user_message: str, timeout: float) -> str:
-    """Ask the model once to rewrite malformed output as a customer-safe WhatsApp reply."""
+    """Ask the model once to minimally clean malformed output as a customer-safe WhatsApp reply."""
+    cleaned_draft = _clean_ai_reply_text(bad_reply)
+    repair_source = cleaned_draft or str(bad_reply or "")
     repair_messages = [
         SystemMessage(
             content=(
                 "Anda adalah CS Toko Teladan Percetakan & ATK. "
-                "Tulis ulang jawaban menjadi SATU pesan WhatsApp untuk pelanggan. "
-                "DILARANG memakai token internal, role label, markdown, JSON, code fence, atau kata Continue. "
-                "Jangan jelaskan proses. Output hanya pesan final."
+                "Tugas Anda adalah MEMBERSIHKAN draft jawaban, bukan menulis ulang dari nol. "
+                "Pertahankan makna, gaya ramah admin WA, sapaan, emoji, pantun/candaan yang wajar, "
+                "harga, jumlah, ukuran, stok, deadline, dan detail produk dari draft. "
+                "Ubah sesedikit mungkin. Hapus hanya token internal, role label, markdown, JSON, "
+                "code fence, kata Continue, atau bagian yang jelas rusak. "
+                "Jika draft masih memiliki jawaban pelanggan yang masuk akal, pakai draft itu sebagai dasar. "
+                "Jangan menambah info baru. Output hanya pesan final untuk pelanggan."
             )
         ),
         HumanMessage(
             content=(
                 "Pesan pelanggan:\n"
                 f"{user_message}\n\n"
-                "Output model sebelumnya yang harus diperbaiki:\n"
-                f"{str(bad_reply)[:1200]}\n\n"
-                "Tulis pesan final yang aman dan natural."
+                "Draft jawaban yang harus dibersihkan dengan minimal edit:\n"
+                f"{repair_source[:1200]}\n\n"
+                "Keluarkan hanya versi bersihnya."
             )
         ),
     ]
@@ -258,6 +304,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             return_exceptions=True,
         )
         return greeting_reply
+
+    if _is_generic_buy_intent(user_message):
+        logger.info("LLM [phone=%s]: Generic buy intent; asking for product details", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", BUY_INTENT_NEEDS_DETAIL_REPLY),
+            return_exceptions=True,
+        )
+        return BUY_INTENT_NEEDS_DETAIL_REPLY
 
     # Load previous history and persist the new message concurrently.
     history_limit = max(settings.max_history_length - 1, 0)
