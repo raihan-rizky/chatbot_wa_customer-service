@@ -46,6 +46,16 @@ async def get_sender_defense(phone: str) -> dict | None:
 
     client = get_supabase_client()
     resp = await client.get(_base_url(), headers=_headers(), params=params)
+    
+    if resp.status_code == 404:
+        # Table might not exist yet. Log a warning once or handle silently.
+        # PGRST205 is "Could not find the table in the schema cache"
+        if "PGRST205" in resp.text:
+            logger.warning("Supabase defense table '%s' not found. Anti-spam defense is inactive. Run sql/create_push_notifications.sql to fix.", TABLE)
+        else:
+            logger.error("Supabase defense fetch failed (404): %s", resp.text)
+        return None
+
     if resp.status_code >= 400:
         logger.error("Supabase defense fetch failed: %s %s", resp.status_code, resp.text)
         return None
@@ -73,6 +83,10 @@ async def update_sender_defense(phone: str, fields: dict) -> None:
             headers=_headers(),
             json=payload,
         )
+
+    if resp.status_code == 404 and "PGRST205" in resp.text:
+        # Silent return if table is missing, as we already logged warning in get_sender_defense
+        return
 
     if resp.status_code >= 400:
         logger.error("Supabase defense update failed: %s %s", resp.status_code, resp.text)

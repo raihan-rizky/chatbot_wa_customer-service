@@ -223,13 +223,26 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
 async def _process_incoming_message(event: str, sender: str, msg_id: str, payload: dict) -> None:
     """Process a WAHA message after the webhook has already been acknowledged."""
-    await save_waha_event(event, sender, msg_id, payload)
+    process_started = time.perf_counter()
+    audit_task = asyncio.create_task(save_waha_event(event, sender, msg_id, payload))
 
-    try:
-        defense = await get_sender_defense(sender)
-    except Exception:
-        logger.exception("Failed to load defense state for %s", sender)
+    defense_task = asyncio.create_task(get_sender_defense(sender))
+    count_task = asyncio.create_task(count_user_messages(sender))
+
+    defense_result, count_result = await asyncio.gather(
+        defense_task,
+        count_task,
+        return_exceptions=True,
+    )
+    if isinstance(defense_result, Exception):
+        logger.exception(
+            "Failed to load defense state for %s",
+            sender,
+            exc_info=(type(defense_result), defense_result, defense_result.__traceback__),
+        )
         defense = None
+    else:
+        defense = defense_result
 
     if defense and defense.get("is_blocked"):
         logger.warning("Ignoring blocked sender %s", sender)
@@ -237,11 +250,15 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
         return
 
     settings = get_settings()
-    try:
-        user_message_count = await count_user_messages(sender)
-    except Exception:
-        logger.exception("Failed to count messages for %s", sender)
+    if isinstance(count_result, Exception):
+        logger.exception(
+            "Failed to count messages for %s",
+            sender,
+            exc_info=(type(count_result), count_result, count_result.__traceback__),
+        )
         user_message_count = settings.stranger_trust_message_count
+    else:
+        user_message_count = count_result
     is_stranger = user_message_count < settings.stranger_trust_message_count
     rate_limit_messages = (
         settings.stranger_rate_limit_messages
@@ -296,10 +313,21 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
         elif msg_type == "chat":
             text = payload.get("body", "")
             if text:
+                reply_started = time.perf_counter()
+                reply = await _handle_text(sender, text)
+                logger.info(
+                    "Customer reply path completed for %s message=%s elapsed_ms=%d total_elapsed_ms=%d",
+                    sender,
+                    msg_id,
+                    int((time.perf_counter() - reply_started) * 1000),
+                    int((time.perf_counter() - process_started) * 1000),
+                )
+
                 closing_result = await classify_closing_intent(
                     sender,
                     text,
-                    stored_user_message_count=user_message_count,
+                    latest_message_saved=True,
+                    stored_user_message_count=user_message_count + 1,
                 )
                 closing_detected = closing_result.is_closing
                 if closing_result.is_closing:
@@ -323,7 +351,6 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
                         closing_result.confidence,
                         closing_result.reason,
                     )
-                reply = await _handle_text(sender, text)
                 if (
                     not closing_detected
                     and reply
@@ -365,18 +392,35 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
             logger.info("Skipping unsupported message type: %s", msg_type)
     except Exception:
         logger.error("Error processing webhook:\n%s", traceback.format_exc())
+    finally:
+        await audit_task
+        logger.info(
+            "Webhook processing finished for %s message=%s elapsed_ms=%d",
+            sender,
+            msg_id,
+            int((time.perf_counter() - process_started) * 1000),
+        )
 
 
 async def _handle_text(phone: str, text: str) -> str | None:
     """Handle a text message — generate AI reply and save to Supabase."""
     logger.info("Text from %s: %s", phone, text[:80])
+    started = time.perf_counter()
 
     try:
         # LLM will handle everything naturally based on its prompt
         reply = await get_ai_response(phone, text)
-        logger.info("AI reply ready, sending to %s", phone)
+        logger.info(
+            "AI reply ready for %s elapsed_ms=%d; sending to WAHA",
+            phone,
+            int((time.perf_counter() - started) * 1000),
+        )
         await send_message(phone, reply)
-        logger.info("Reply sent to %s", phone)
+        logger.info(
+            "Reply sent to %s total_elapsed_ms=%d",
+            phone,
+            int((time.perf_counter() - started) * 1000),
+        )
         return reply
     except Exception:
         logger.error("Failed to reply to %s:\n%s", phone, traceback.format_exc())

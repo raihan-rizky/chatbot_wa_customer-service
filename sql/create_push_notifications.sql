@@ -4,19 +4,21 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TABLE IF NOT EXISTS push_subscriptions (
+CREATE TABLE IF NOT EXISTS pos_push_subscriptions (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID,
+    userId      VARCHAR(255),
     endpoint    TEXT NOT NULL UNIQUE,
     p256dh      TEXT NOT NULL,
     auth        TEXT NOT NULL,
     user_agent  TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    storeId     VARCHAR(100),
+    isActive    BOOLEAN DEFAULT TRUE,
+    createdAt   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updatedAt   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id
-    ON push_subscriptions (user_id);
+CREATE INDEX IF NOT EXISTS idx_pos_push_subscriptions_userId
+    ON pos_push_subscriptions ("userId");
 
 CREATE TABLE IF NOT EXISTS negotiations (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -53,9 +55,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_push_subscriptions_updated_at ON push_subscriptions;
-CREATE TRIGGER trg_push_subscriptions_updated_at
-BEFORE UPDATE ON push_subscriptions
+DROP TRIGGER IF EXISTS trg_pos_push_subscriptions_updated_at ON pos_push_subscriptions;
+CREATE TRIGGER trg_pos_push_subscriptions_updated_at
+BEFORE UPDATE ON pos_push_subscriptions
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
@@ -65,7 +67,7 @@ BEFORE UPDATE ON negotiations
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
-ALTER TABLE push_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pos_push_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE negotiations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waha_events ENABLE ROW LEVEL SECURITY;
 

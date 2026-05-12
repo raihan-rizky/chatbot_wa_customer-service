@@ -18,6 +18,31 @@ _cache: list[dict] | None = None
 _cache_ts: float = 0
 CACHE_TTL = 300  # 5 minutes
 
+GENERIC_QUERY_WORDS = {
+    "admin",
+    "assalam",
+    "assalamualaikum",
+    "bisa",
+    "bro",
+    "buk",
+    "halo",
+    "hallo",
+    "harga",
+    "hai",
+    "hello",
+    "info",
+    "kak",
+    "mas",
+    "mbak",
+    "min",
+    "minta",
+    "pak",
+    "pagi",
+    "siang",
+    "sore",
+    "malam",
+}
+
 
 def _headers() -> dict[str, str]:
     """Build Supabase REST API headers."""
@@ -75,7 +100,7 @@ def _message_keywords(message: str, limit: int = 5) -> list[str]:
     words = re.findall(r"[a-z0-9]+", message.lower())
     deduped: list[str] = []
     for word in sorted(words, key=len, reverse=True):
-        if len(word) < 3 or word in deduped:
+        if len(word) < 3 or word in GENERIC_QUERY_WORDS or word in deduped:
             continue
         deduped.append(word)
         if len(deduped) >= limit:

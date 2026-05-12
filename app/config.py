@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     nebius_model: str = "Qwen/Qwen3-14B"
     nebius_closing_model: str = ""
     nebius_vision_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
+    nebius_request_timeout_seconds: float = 45.0
+    nebius_closing_timeout_seconds: float = 12.0
 
     # ── WAHA (WhatsApp HTTP API) ─────────────────────────────────
     waha_base_url: str = "https://pseudolegal-chelsey-tacitly.ngrok-free.dev"

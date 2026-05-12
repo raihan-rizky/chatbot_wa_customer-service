@@ -55,8 +55,6 @@ CLOSING_KEYWORDS = (
     "buatkan",
     "dibuatkan",
     "dibikin",
-    "cetak",
-    "print",
     "saya order",
     "mau order",
     "order",
@@ -142,7 +140,7 @@ def _get_closing_llm() -> ChatNebius:
             model=model,
             temperature=0.0,
             top_p=0.8,
-            max_tokens=300,
+            max_tokens=120,
         )
     return _closing_llm
 
@@ -306,7 +304,10 @@ async def classify_closing_intent(
 
     try:
         llm = _get_closing_llm()
-        response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+        response = await asyncio.wait_for(
+            llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]),
+            timeout=get_settings().nebius_closing_timeout_seconds,
+        )
         result = _parse_classifier_result(response.content, trigger)
         logger.info(
             "Closing classifier result phone=%s trigger=%s is_closing=%s confidence=%.2f reason=%r missing_details=%s",
@@ -445,7 +446,10 @@ async def notify_closing_deal(
 
 
 async def _fetch_subscriptions() -> list[dict[str, Any]]:
-    params = {"select": "id,endpoint,p256dh,auth"}
+    params = {
+        "select": "id,endpoint,p256dh,auth",
+        "isActive": "eq.true"
+    }
     try:
         client = get_supabase_client()
         resp = await client.get(_table_url(PUSH_TABLE), headers=_headers(), params=params)
