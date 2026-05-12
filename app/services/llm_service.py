@@ -65,6 +65,10 @@ STRUCTURED_ARTIFACT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 JSON_KEY_RE = re.compile(r"['\"]?(type|role|content|channel|message)['\"]?\s*:", flags=re.IGNORECASE)
+MALFORMED_ENGLISH_RE = re.compile(
+    r"\b(we are|autonomous|autojmoues|autojmous|as an ai|language model)\b",
+    flags=re.IGNORECASE,
+)
 MIN_USABLE_REPLY_CHARS = 12
 MAX_CONTROL_WORDS_AFTER_CLEANING = 1
 
@@ -76,6 +80,12 @@ BUY_INTENT_NEEDS_DETAIL_REPLY = (
 )
 BANNER_DETAIL_REPLY = (
     "Siap kak, untuk banner/spanduk bisa. Tolong kirim ukuran, jumlah, bahan kalau sudah ada, dan deadline-nya ya; nanti kami bantu estimasi harga. 😊"
+)
+ALBATROS_BANNER_REPLY = (
+    "Untuk cetak Albatros harganya Rp105.000/m2 ya kak. Kirim ukuran, jumlah, dan deadline-nya, nanti kami bantu hitungkan estimasinya. 😊"
+)
+IDENTITY_REPLY = (
+    "Saya asisten CS Toko Teladan Percetakan & ATK. Saya bantu info produk, harga, stok, order, dan estimasi cetak ya. 😊"
 )
 
 
@@ -178,6 +188,30 @@ def _is_banner_order_intent(message: str) -> bool:
     return bool(words & banner_words) and bool(words & intent_words)
 
 
+def _is_albatros_banner_question(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", message.lower())
+    words = set(normalized.split())
+    albatros_words = {"albatros", "albattros", "albatross", "alba"}
+    banner_words = {"banner", "spanduk", "cetak", "print"}
+    return bool(words & albatros_words) and bool(words & banner_words)
+
+
+def _is_identity_question(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", message.lower())
+    normalized = " ".join(normalized.split())
+    identity_phrases = {
+        "kamu siapa",
+        "anda siapa",
+        "ini siapa",
+        "siapa kamu",
+        "siapa anda",
+        "siapa ini",
+        "bot apa",
+        "admin siapa",
+    }
+    return normalized in identity_phrases
+
+
 def _clean_ai_reply_text(raw_reply: object) -> str:
     """Remove obvious model control artifacts without deciding if the reply is valid."""
     text = str(raw_reply or "").strip()
@@ -213,6 +247,7 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
     has_structured_artifacts = bool(STRUCTURED_ARTIFACT_RE.search(text))
     structured_key_count = len(JSON_KEY_RE.findall(text))
     starts_like_structured_data = text[:1] in {"{", "["}
+    has_malformed_english = bool(MALFORMED_ENGLISH_RE.search(text))
 
     if (
         has_internal_tokens_after_cleaning
@@ -222,13 +257,14 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
         or has_structured_artifacts
         or structured_key_count >= 2
         or starts_like_structured_data
+        or has_malformed_english
     ):
         raise ValueError(
             "LLM reply unusable after sanitizing "
             f"(chars={len(text)} control_words={control_word_count} "
             f"internal_tokens={has_internal_tokens_after_cleaning} noise_only={is_noise_only} "
             f"structured_artifacts={has_structured_artifacts} structured_keys={structured_key_count} "
-            f"starts_structured={starts_like_structured_data})"
+            f"starts_structured={starts_like_structured_data} malformed_english={has_malformed_english})"
         )
 
     return text
@@ -313,6 +349,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
         )
         return greeting_reply
 
+    if _is_albatros_banner_question(user_message):
+        logger.info("LLM [phone=%s]: Albatros banner question; using deterministic reply", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", ALBATROS_BANNER_REPLY),
+            return_exceptions=True,
+        )
+        return ALBATROS_BANNER_REPLY
+
     if _is_banner_order_intent(user_message):
         logger.info("LLM [phone=%s]: Banner order intent; asking for banner details", phone)
         await asyncio.gather(
@@ -321,6 +366,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             return_exceptions=True,
         )
         return BANNER_DETAIL_REPLY
+
+    if _is_identity_question(user_message):
+        logger.info("LLM [phone=%s]: Identity question; using deterministic reply", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", IDENTITY_REPLY),
+            return_exceptions=True,
+        )
+        return IDENTITY_REPLY
 
     if _is_generic_buy_intent(user_message):
         logger.info("LLM [phone=%s]: Generic buy intent; asking for product details", phone)

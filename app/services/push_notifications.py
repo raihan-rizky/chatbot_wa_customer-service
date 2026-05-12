@@ -210,6 +210,33 @@ def _has_high_intent_closing_phrase(text: str) -> bool:
     return any(_contains_phrase(normalized, phrase) for phrase in HIGH_INTENT_CLOSING_PHRASES)
 
 
+def _is_obviously_not_closing_text(text: str) -> bool:
+    normalized = _normalize_text(text)
+    question_phrases = (
+        "apa",
+        "apakah",
+        "berapa",
+        "bisa",
+        "gimana",
+        "kapan",
+        "kenapa",
+        "siapa",
+        "kamu siapa",
+        "anda siapa",
+        "ini siapa",
+        "siapa kamu",
+        "siapa anda",
+        "dimana",
+        "di mana",
+        "harga",
+        "stok",
+        "stock",
+    )
+    if "?" in text:
+        return True
+    return any(_contains_phrase(normalized, phrase) for phrase in question_phrases)
+
+
 def has_high_intent_closing_phrase(text: str) -> bool:
     """Return True for buyer messages that clearly close or confirm an order."""
     return _has_high_intent_closing_phrase(text)
@@ -280,6 +307,14 @@ async def classify_closing_intent(
         stored_user_message_count = await count_user_messages(phone)
     user_message_count = stored_user_message_count if latest_message_saved else stored_user_message_count + 1
 
+    if not force_trigger and _is_obviously_not_closing_text(text):
+        logger.info(
+            "Closing classifier skipped obvious non-closing question phone=%s preview=%r",
+            phone,
+            _text_preview(text),
+        )
+        return ClosingClassification(False, 0.0, "obvious non-closing question", "skipped_question")
+
     if not force_trigger and _has_high_intent_closing_phrase(text):
         return ClosingClassification(
             True,
@@ -291,7 +326,7 @@ async def classify_closing_intent(
     if force_trigger:
         periodic_gate = False
     elif not keyword_gate:
-        periodic_gate = user_message_count % PERIODIC_CLASSIFIER_MESSAGE_INTERVAL == 0
+        periodic_gate = False
     else:
         periodic_gate = False
 
