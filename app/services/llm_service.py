@@ -82,16 +82,26 @@ def _get_llm() -> ChatNebius:
             temperature=0.3,
             top_p=0.90,
             max_tokens=256,
-            stop=[
-                "###",
-                "User:",
-                "Assistant:",
-                "Customer:",
-                "System:",
-                "```",
-            ],
         )
     return _llm
+
+
+def _extract_ai_message_text(response: object) -> str:
+    """Extract assistant-visible text from a LangChain response object."""
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                value = item.get("text") or item.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+        return "\n".join(parts)
+    return str(content or "")
 
 
 def _is_simple_greeting(message: str) -> bool:
@@ -342,7 +352,15 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             llm.ainvoke(messages),
             timeout=settings.nebius_request_timeout_seconds,
         )
-        reply = _sanitize_ai_reply(response.content)
+        raw_reply = _extract_ai_message_text(response)
+        if not raw_reply.strip():
+            logger.error(
+                "LLM [phone=%s]: Empty assistant content from Nebius response; metadata=%s additional_kwargs=%s",
+                phone,
+                getattr(response, "response_metadata", None),
+                getattr(response, "additional_kwargs", None),
+            )
+        reply = _sanitize_ai_reply(raw_reply)
         logger.info("LLM [phone=%s]: Response SUCCESS. Reply length: %d chars.", phone, len(str(reply)))
 
         # Save AI reply to Supabase
