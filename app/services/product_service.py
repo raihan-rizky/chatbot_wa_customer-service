@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
-import httpx
-
 from app.config import get_settings
+from app.services.http_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -55,20 +55,97 @@ async def fetch_products() -> list[dict]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(_base_url(), headers=_headers(), params=params)
-            if resp.status_code >= 400:
-                logger.error("Product fetch failed: HTTP %s - %s", resp.status_code, resp.text)
-                return _cache or []
+        client = get_supabase_client()
+        resp = await client.get(_base_url(), headers=_headers(), params=params)
+        if resp.status_code >= 400:
+            logger.error("Product fetch failed: HTTP %s - %s", resp.status_code, resp.text)
+            return _cache or []
 
-            products = resp.json()
-            _cache = products
-            _cache_ts = time.time()
-            logger.info("Product fetch SUCCESS: Retrieved %d products from Supabase", len(products))
-            return products
+        products = resp.json()
+        _cache = products
+        _cache_ts = time.time()
+        logger.info("Product fetch SUCCESS: Retrieved %d products from Supabase", len(products))
+        return products
     except Exception as e:
         logger.exception("Product fetch ERROR: An exception occurred during fetch_products. Exception: %s", str(e))
         return _cache or []
+
+
+def _message_keywords(message: str, limit: int = 5) -> list[str]:
+    words = re.findall(r"[a-z0-9]+", message.lower())
+    deduped: list[str] = []
+    for word in sorted(words, key=len, reverse=True):
+        if len(word) < 3 or word in deduped:
+            continue
+        deduped.append(word)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _filter_products(products: list[dict], keywords: list[str]) -> list[dict]:
+    if not keywords:
+        return []
+
+    filtered: list[dict] = []
+    for product in products:
+        searchable_text = (
+            f"{product.get('name', '')} "
+            f"{product.get('categoryId', '')} "
+            f"{product.get('material', '')}"
+        ).lower()
+        if any(keyword in searchable_text for keyword in keywords):
+            filtered.append(product)
+    return filtered
+
+
+async def fetch_matching_products(user_message: str) -> list[dict]:
+    """Fetch likely relevant products without loading the full catalog on cold cache."""
+    global _cache, _cache_ts
+
+    keywords = _message_keywords(user_message)
+    if not keywords:
+        return []
+
+    if _cache is not None and (time.time() - _cache_ts) < CACHE_TTL:
+        return _filter_products(_cache, keywords)
+
+    or_filters: list[str] = []
+    for keyword in keywords:
+        safe_keyword = re.sub(r"[^a-z0-9]", "", keyword)
+        if not safe_keyword:
+            continue
+        wildcard = f"*{safe_keyword}*"
+        or_filters.extend(
+            [
+                f"name.ilike.{wildcard}",
+                f"categoryId.ilike.{wildcard}",
+                f"material.ilike.{wildcard}",
+            ]
+        )
+
+    if not or_filters:
+        return []
+
+    params = {
+        "select": "name,sku,price,unit,categoryId,material,stock",
+        "or": f"({','.join(or_filters)})",
+        "order": "categoryId.asc,name.asc",
+        "limit": "40",
+    }
+
+    try:
+        client = get_supabase_client()
+        resp = await client.get(_base_url(), headers=_headers(), params=params)
+        if resp.status_code >= 400:
+            logger.error("Product search failed: HTTP %s - %s", resp.status_code, resp.text)
+            return []
+        products = resp.json()
+        logger.info("Product search SUCCESS: Retrieved %d matching products", len(products))
+        return products
+    except Exception as e:
+        logger.exception("Product search ERROR: %s", str(e))
+        return []
 
 
 def format_products_for_prompt(products: list[dict]) -> str:

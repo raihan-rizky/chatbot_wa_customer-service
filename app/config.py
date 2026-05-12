@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # ── Nebius AI Studio ─────────────────────────────────────────
     nebius_api_key: str
     nebius_model: str = "Qwen/Qwen3-14B"
+    nebius_closing_model: str = ""
     nebius_vision_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
 
     # ── WAHA (WhatsApp HTTP API) ─────────────────────────────────

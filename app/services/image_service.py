@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import logging
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nebius import ChatNebius
 
 from app.config import get_settings
+from app.services.http_client import get_waha_client
 from app.services.product_service import fetch_products, format_products_for_prompt
 
 logger = logging.getLogger(__name__)
@@ -75,59 +75,59 @@ async def download_wa_media(phone: str, msg_id: str) -> bytes:
     logger.info("WAHA Media: START FETCH [phone=%s, msg_id=%s]", phone, msg_id)
     
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            logger.info("WAHA Media: Requesting chat history from %s", url)
-            resp = await client.get(url, headers=headers)
+        client = get_waha_client()
+        logger.info("WAHA Media: Requesting chat history from %s", url)
+        resp = await client.get(url, headers=headers)
             
-            if resp.status_code != 200:
-                logger.error("WAHA Media ERROR: Failed to get messages [status=%s, body=%s]", resp.status_code, resp.text[:200])
-                return b""
+        if resp.status_code != 200:
+            logger.error("WAHA Media ERROR: Failed to get messages [status=%s, body=%s]", resp.status_code, resp.text[:200])
+            return b""
             
-            messages = resp.json()
-            logger.info("WAHA Media: Retrieved %d messages from history", len(messages))
+        messages = resp.json()
+        logger.info("WAHA Media: Retrieved %d messages from history", len(messages))
             
-            target_media_url = None
+        target_media_url = None
             
-            # Look for the message that has Media
-            for i, msg in enumerate(messages):
-                has_media = msg.get("hasMedia")
-                media_data = msg.get("media")
-                m_id = msg.get("id", "")
+        # Look for the message that has Media
+        for i, msg in enumerate(messages):
+            has_media = msg.get("hasMedia")
+            media_data = msg.get("media")
+            m_id = msg.get("id", "")
                 
-                if has_media and media_data:
-                    found_url = media_data.get("url")
-                    if found_url:
-                        logger.info("WAHA Media: Found media in msg[%d] (id=%s). URL: %s", i, m_id, found_url)
-                        target_media_url = found_url
-                        # If ID matches exactly, we stop immediately
-                        if msg_id in m_id:
-                            logger.info("WAHA Media: Exact msg_id match found at index %d", i)
-                            break
+            if has_media and media_data:
+                found_url = media_data.get("url")
+                if found_url:
+                    logger.info("WAHA Media: Found media in msg[%d] (id=%s). URL: %s", i, m_id, found_url)
+                    target_media_url = found_url
+                    # If ID matches exactly, we stop immediately
+                    if msg_id in m_id:
+                        logger.info("WAHA Media: Exact msg_id match found at index %d", i)
+                        break
             
-            if not target_media_url:
-                logger.error("WAHA Media ERROR: No media URL found in recent messages for msg %s", msg_id)
-                return b""
+        if not target_media_url:
+            logger.error("WAHA Media ERROR: No media URL found in recent messages for msg %s", msg_id)
+            return b""
                 
-            # Host correction logic
-            if "localhost" in target_media_url or "127.0.0.1" in target_media_url:
-                from urllib.parse import urlparse
-                parsed_media = urlparse(target_media_url)
-                parsed_base = urlparse(settings.waha_base_url)
-                new_url = target_media_url.replace(
-                    f"{parsed_media.scheme}://{parsed_media.netloc}", 
-                    f"{parsed_base.scheme}://{parsed_base.netloc}"
-                )
-                logger.info("WAHA Media: Applied host correction: %s -> %s", target_media_url, new_url)
-                target_media_url = new_url
+        # Host correction logic
+        if "localhost" in target_media_url or "127.0.0.1" in target_media_url:
+            from urllib.parse import urlparse
+            parsed_media = urlparse(target_media_url)
+            parsed_base = urlparse(settings.waha_base_url)
+            new_url = target_media_url.replace(
+                f"{parsed_media.scheme}://{parsed_media.netloc}", 
+                f"{parsed_base.scheme}://{parsed_base.netloc}"
+            )
+            logger.info("WAHA Media: Applied host correction: %s -> %s", target_media_url, new_url)
+            target_media_url = new_url
 
-            logger.info("WAHA Media: Downloading actual file bytes from %s", target_media_url)
-            file_resp = await client.get(target_media_url, headers=headers)
-            if file_resp.status_code != 200:
-                logger.error("WAHA Media ERROR: Download failed [status=%s]", file_resp.status_code)
-                return b""
+        logger.info("WAHA Media: Downloading actual file bytes from %s", target_media_url)
+        file_resp = await client.get(target_media_url, headers=headers)
+        if file_resp.status_code != 200:
+            logger.error("WAHA Media ERROR: Download failed [status=%s]", file_resp.status_code)
+            return b""
                 
-            logger.info("WAHA Media SUCCESS: Downloaded %d bytes", len(file_resp.content))
-            return file_resp.content
+        logger.info("WAHA Media SUCCESS: Downloaded %d bytes", len(file_resp.content))
+        return file_resp.content
 
     except Exception as e:
         logger.exception("WAHA Media EXCEPTION: Unexpected error during fetch: %s", str(e))
@@ -178,4 +178,3 @@ async def analyze_image(image_bytes: bytes, caption: str | None = None) -> str:
     except Exception as e:
         logger.exception("Vision LLM ERROR: Vision model call failed. Exception: %s", str(e))
         return "Maaf, saya gagal menganalisa gambar ini. Coba kirim ulang dengan resolusi lebih jelas ya! 🙏"
-

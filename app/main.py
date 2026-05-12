@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI
 
 from app.routes.webhook import router as webhook_router
+from app.services.http_client import close_http_clients
 
 # ── Logging ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -29,6 +30,12 @@ app.include_router(webhook_router)
 async def health_check():
     """Simple health-check endpoint."""
     return {"status": "ok", "service": "whatsapp-ai-cs-chatbot"}
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    """Close shared outbound HTTP clients."""
+    await close_http_clients()
 
 
 # ── Run directly with `python -m app.main` ──────────────────────

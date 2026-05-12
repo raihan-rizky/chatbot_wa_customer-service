@@ -8,7 +8,7 @@ import logging
 import traceback
 import time
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -134,20 +134,20 @@ async def push_closing_deal(
 
 # ── Incoming messages ────────────────────────────────────────────
 @router.post("/webhook")
-async def receive_message(request: Request):
+async def receive_message(request: Request, background_tasks: BackgroundTasks):
     """Receive incoming WhatsApp messages (WAHA format) and process replies."""
-    print("🔔 WEBHOOK ENDPOINT HIT!")  # Force print to Vercel logs
+    logger.info("Webhook endpoint hit")
     
     try:
         body = await request.json()
-        print("WEBHOOK BODY:", body)
+        logger.debug("Webhook body: %s", body)
     except Exception:
-        print("WEBHOOK ERROR: Invalid JSON")
+        logger.warning("Webhook error: invalid JSON")
         return {"status": "ok"}
 
     event = body.get("event")
     if event != "message":
-        print("WEBHOOK: Ignored event type:", event)
+        logger.info("Webhook ignored event type: %s", event)
         return {"status": "ok"}
 
     payload = body.get("payload", {})
@@ -209,15 +209,21 @@ async def receive_message(request: Request):
 
     sender = sender_jid.replace("@c.us", "")
 
-    await save_waha_event(event, sender, msg_id, payload)
-
-    # Deduplicate
+    # Deduplicate before any external writes.
     if msg_id in _processed_ids:
         logger.info("Skipping duplicate message %s", msg_id)
         return {"status": "ok"}
     _processed_ids.add(msg_id)
     if len(_processed_ids) > 1000:
         _processed_ids.clear()
+
+    background_tasks.add_task(_process_incoming_message, event, sender, msg_id, payload)
+    return {"status": "ok"}
+
+
+async def _process_incoming_message(event: str, sender: str, msg_id: str, payload: dict) -> None:
+    """Process a WAHA message after the webhook has already been acknowledged."""
+    await save_waha_event(event, sender, msg_id, payload)
 
     try:
         defense = await get_sender_defense(sender)
@@ -228,7 +234,7 @@ async def receive_message(request: Request):
     if defense and defense.get("is_blocked"):
         logger.warning("Ignoring blocked sender %s", sender)
         _blocked_users.add(sender)
-        return {"status": "ok"}
+        return
 
     settings = get_settings()
     try:
@@ -267,7 +273,7 @@ async def receive_message(request: Request):
                     abuse["abuse_count"],
                 )
                 await _enforce_abuse_block(sender, abuse["block_reason"])
-                return {"status": "ok"}
+                return
         except Exception:
             logger.exception("Failed to record abuse for %s", sender)
         if sender not in _warned_users:
@@ -277,7 +283,7 @@ async def receive_message(request: Request):
                 await send_message(sender, "⚠️ Maaf, kamu mengirim pesan terlalu cepat. Sistem AI kami butuh waktu untuk memproses. Mohon tunggu sekitar 1 menit sebelum mengirim pesan lagi ya.")
             except Exception:
                 pass
-        return {"status": "ok"}
+        return
 
     msg_type = payload.get("type", "chat")
     has_media = payload.get("hasMedia", False)
@@ -290,7 +296,11 @@ async def receive_message(request: Request):
         elif msg_type == "chat":
             text = payload.get("body", "")
             if text:
-                closing_result = await classify_closing_intent(sender, text)
+                closing_result = await classify_closing_intent(
+                    sender,
+                    text,
+                    stored_user_message_count=user_message_count,
+                )
                 closing_detected = closing_result.is_closing
                 if closing_result.is_closing:
                     logger.info(
@@ -329,6 +339,7 @@ async def receive_message(request: Request):
                         text,
                         force_trigger="assistant_admin_handoff_phrase",
                         latest_message_saved=True,
+                        stored_user_message_count=user_message_count + 1,
                     )
                     if handoff_result.is_closing:
                         logger.info(
@@ -354,8 +365,6 @@ async def receive_message(request: Request):
             logger.info("Skipping unsupported message type: %s", msg_type)
     except Exception:
         logger.error("Error processing webhook:\n%s", traceback.format_exc())
-
-    return {"status": "ok"}
 
 
 async def _handle_text(phone: str, text: str) -> str | None:

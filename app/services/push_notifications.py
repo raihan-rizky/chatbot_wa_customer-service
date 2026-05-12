@@ -10,13 +10,13 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nebius import ChatNebius
 from pywebpush import WebPushException, webpush
 
 from app.config import get_settings
 from app.services.chat_history import count_user_messages, get_history
+from app.services.http_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,10 @@ def _get_closing_llm() -> ChatNebius:
     global _closing_llm
     if _closing_llm is None:
         settings = get_settings()
+        model = settings.nebius_closing_model or settings.nebius_model
         _closing_llm = ChatNebius(
             api_key=settings.nebius_api_key,
-            model=settings.nebius_model,
+            model=model,
             temperature=0.0,
             top_p=0.8,
             max_tokens=300,
@@ -238,13 +239,23 @@ async def classify_closing_intent(
     *,
     force_trigger: str | None = None,
     latest_message_saved: bool = False,
+    stored_user_message_count: int | None = None,
 ) -> ClosingClassification:
     """Classify whether the latest customer text closes an order/deal."""
     keyword_matches = _matching_closing_keywords(text)
     keyword_gate = bool(keyword_matches)
     history_rows: list[dict[str, Any]] = []
-    stored_user_message_count = await count_user_messages(phone)
+    if stored_user_message_count is None:
+        stored_user_message_count = await count_user_messages(phone)
     user_message_count = stored_user_message_count if latest_message_saved else stored_user_message_count + 1
+
+    if not force_trigger and _has_high_intent_closing_phrase(text):
+        return ClosingClassification(
+            True,
+            1.0,
+            "high-intent closing phrase matched without LLM",
+            "high_intent_keyword",
+        )
 
     if force_trigger:
         periodic_gate = False
@@ -339,10 +350,10 @@ async def save_waha_event(event_name: str, chat_id: str, message_id: str, payloa
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(_table_url(EVENT_TABLE), headers=_headers("return=minimal"), json=row)
-            if resp.status_code >= 400:
-                logger.error("Failed to save WAHA event: %s %s", resp.status_code, resp.text)
+        client = get_supabase_client()
+        resp = await client.post(_table_url(EVENT_TABLE), headers=_headers("return=minimal"), json=row)
+        if resp.status_code >= 400:
+            logger.error("Failed to save WAHA event: %s %s", resp.status_code, resp.text)
     except Exception as exc:
         logger.exception("Failed to save WAHA event: %s", exc)
 
@@ -359,15 +370,15 @@ async def mark_negotiation_closed(chat_id: str, customer_name: str | None = None
 
     params = {"on_conflict": "chat_id"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                _table_url(NEGOTIATION_TABLE),
-                headers=_headers("resolution=merge-duplicates,return=minimal"),
-                params=params,
-                json=row,
-            )
-            if resp.status_code >= 400:
-                logger.error("Failed to mark negotiation closed: %s %s", resp.status_code, resp.text)
+        client = get_supabase_client()
+        resp = await client.post(
+            _table_url(NEGOTIATION_TABLE),
+            headers=_headers("resolution=merge-duplicates,return=minimal"),
+            params=params,
+            json=row,
+        )
+        if resp.status_code >= 400:
+            logger.error("Failed to mark negotiation closed: %s %s", resp.status_code, resp.text)
     except Exception as exc:
         logger.exception("Failed to mark negotiation closed: %s", exc)
 
@@ -436,12 +447,12 @@ async def notify_closing_deal(
 async def _fetch_subscriptions() -> list[dict[str, Any]]:
     params = {"select": "id,endpoint,p256dh,auth"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(_table_url(PUSH_TABLE), headers=_headers(), params=params)
-            if resp.status_code >= 400:
-                logger.error("Failed to fetch push subscriptions: %s %s", resp.status_code, resp.text)
-                return []
-            return resp.json()
+        client = get_supabase_client()
+        resp = await client.get(_table_url(PUSH_TABLE), headers=_headers(), params=params)
+        if resp.status_code >= 400:
+            logger.error("Failed to fetch push subscriptions: %s %s", resp.status_code, resp.text)
+            return []
+        return resp.json()
     except Exception as exc:
         logger.exception("Failed to fetch push subscriptions: %s", exc)
         return []
@@ -540,9 +551,9 @@ async def _send_push(subscription: dict[str, Any], payload: str) -> PushSendResu
 async def _delete_subscription(endpoint: str) -> None:
     params = {"endpoint": f"eq.{endpoint}"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.delete(_table_url(PUSH_TABLE), headers=_headers("return=minimal"), params=params)
-            if resp.status_code >= 400:
-                logger.error("Failed to delete expired push subscription: %s %s", resp.status_code, resp.text)
+        client = get_supabase_client()
+        resp = await client.delete(_table_url(PUSH_TABLE), headers=_headers("return=minimal"), params=params)
+        if resp.status_code >= 400:
+            logger.error("Failed to delete expired push subscription: %s %s", resp.status_code, resp.text)
     except Exception as exc:
         logger.exception("Failed to delete expired push subscription: %s", exc)

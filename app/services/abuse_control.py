@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-import httpx
-
 from app.config import get_settings
+from app.services.http_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +44,14 @@ async def get_sender_defense(phone: str) -> dict | None:
         "limit": "1",
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(_base_url(), headers=_headers(), params=params)
-        if resp.status_code >= 400:
-            logger.error("Supabase defense fetch failed: %s %s", resp.status_code, resp.text)
-            return None
+    client = get_supabase_client()
+    resp = await client.get(_base_url(), headers=_headers(), params=params)
+    if resp.status_code >= 400:
+        logger.error("Supabase defense fetch failed: %s %s", resp.status_code, resp.text)
+        return None
 
-        rows = resp.json()
-        return rows[0] if rows else None
+    rows = resp.json()
+    return rows[0] if rows else None
 
 
 async def update_sender_defense(phone: str, fields: dict) -> None:
@@ -60,23 +59,23 @@ async def update_sender_defense(phone: str, fields: dict) -> None:
     payload = {"phone": phone, **fields}
     existing = await get_sender_defense(phone)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        if existing:
-            resp = await client.patch(
-                _base_url(),
-                headers=_headers(),
-                params={"phone": f"eq.{phone}"},
-                json=fields,
-            )
-        else:
-            resp = await client.post(
-                _base_url(),
-                headers=_headers(),
-                json=payload,
-            )
+    client = get_supabase_client()
+    if existing:
+        resp = await client.patch(
+            _base_url(),
+            headers=_headers(),
+            params={"phone": f"eq.{phone}"},
+            json=fields,
+        )
+    else:
+        resp = await client.post(
+            _base_url(),
+            headers=_headers(),
+            json=payload,
+        )
 
-        if resp.status_code >= 400:
-            logger.error("Supabase defense update failed: %s %s", resp.status_code, resp.text)
+    if resp.status_code >= 400:
+        logger.error("Supabase defense update failed: %s %s", resp.status_code, resp.text)
 
 
 async def record_abuse(phone: str, reason: str) -> dict:

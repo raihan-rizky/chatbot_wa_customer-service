@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
 from app.config import get_settings
+from app.services.http_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,16 +46,16 @@ async def save_message(
     if image_url:
         payload["image_url"] = image_url
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            _base_url(),
-            headers=_headers(),
-            json=payload,
-        )
-        if resp.status_code >= 400:
-            logger.error("Supabase save failed: %s %s", resp.status_code, resp.text)
-        else:
-            logger.info("Saved %s message for %s", role, phone)
+    client = get_supabase_client()
+    resp = await client.post(
+        _base_url(),
+        headers=_headers(),
+        json=payload,
+    )
+    if resp.status_code >= 400:
+        logger.error("Supabase save failed: %s %s", resp.status_code, resp.text)
+    else:
+        logger.info("Saved %s message for %s", role, phone)
 
 
 async def get_history(phone: str, limit: int = 20) -> list[dict]:
@@ -78,15 +77,15 @@ async def get_history(phone: str, limit: int = 20) -> list[dict]:
     headers = _headers()
     headers["Prefer"] = "return=representation"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(_base_url(), headers=headers, params=params)
-        if resp.status_code >= 400:
-            logger.error("Supabase fetch failed: %s %s", resp.status_code, resp.text)
-            return []
+    client = get_supabase_client()
+    resp = await client.get(_base_url(), headers=headers, params=params)
+    if resp.status_code >= 400:
+        logger.error("Supabase fetch failed: %s %s", resp.status_code, resp.text)
+        return []
 
-        messages = resp.json()
-        messages.reverse()
-        return messages
+    messages = resp.json()
+    messages.reverse()
+    return messages
 
 
 async def count_user_messages(phone: str) -> int:
@@ -100,26 +99,26 @@ async def count_user_messages(phone: str) -> int:
     headers = _headers()
     headers["Prefer"] = "count=exact"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(_base_url(), headers=headers, params=params)
-        if resp.status_code >= 400:
-            logger.error("Supabase count failed: %s %s", resp.status_code, resp.text)
-            return 0
+    client = get_supabase_client()
+    resp = await client.get(_base_url(), headers=headers, params=params)
+    if resp.status_code >= 400:
+        logger.error("Supabase count failed: %s %s", resp.status_code, resp.text)
+        return 0
 
-        content_range = resp.headers.get("content-range", "")
-        try:
-            return int(content_range.rsplit("/", 1)[1])
-        except (IndexError, ValueError):
-            logger.warning("Supabase count response missing Content-Range: %s", content_range)
-            return 0
+    content_range = resp.headers.get("content-range", "")
+    try:
+        return int(content_range.rsplit("/", 1)[1])
+    except (IndexError, ValueError):
+        logger.warning("Supabase count response missing Content-Range: %s", content_range)
+        return 0
 
 
 async def clear_history(phone: str) -> None:
     """Delete all messages for a phone number."""
     params = {"phone": f"eq.{phone}"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.delete(_base_url(), headers=_headers(), params=params)
-        if resp.status_code >= 400:
-            logger.error("Supabase delete failed: %s %s", resp.status_code, resp.text)
-        else:
-            logger.info("Cleared history for %s", phone)
+    client = get_supabase_client()
+    resp = await client.delete(_base_url(), headers=_headers(), params=params)
+    if resp.status_code >= 400:
+        logger.error("Supabase delete failed: %s %s", resp.status_code, resp.text)
+    else:
+        logger.info("Cleared history for %s", phone)
