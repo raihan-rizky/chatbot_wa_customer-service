@@ -85,14 +85,36 @@ def _get_llm() -> ChatNebius:
                 "Assistant:",
                 "Customer:",
                 "System:",
-                "<|channel|>",
-                "<|message|>",
-                "<|im_start|>",
-                "<think>",
                 "```",
             ],
         )
     return _llm
+
+
+def _is_simple_greeting(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", message.lower())
+    words = [word for word in normalized.split() if word]
+    if not words or len(words) > 4:
+        return False
+    greeting_words = {
+        "assalam",
+        "assalamualaikum",
+        "hai",
+        "halo",
+        "hallo",
+        "hello",
+        "hi",
+        "hii",
+        "hiii",
+        "pagi",
+        "siang",
+        "sore",
+        "malam",
+    }
+    polite_words = {"admin", "kak", "min", "mas", "mbak", "pak", "buk"}
+    return any(word in greeting_words for word in words) and all(
+        word in greeting_words or word in polite_words for word in words
+    )
 
 
 def _sanitize_ai_reply(raw_reply: object) -> str:
@@ -223,6 +245,19 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             return_exceptions=True,
         )
         return ORDER_RECEIVED_REPLY
+
+    if _is_simple_greeting(user_message):
+        greeting_reply = (
+            "Halo, Toko Teladan Percetakan & ATK di sini. Mau tanya produk, harga, stok, "
+            "atau estimasi cetak apa? 😊"
+        )
+        logger.info("LLM [phone=%s]: Simple greeting; using deterministic reply", phone)
+        await asyncio.gather(
+            save_message(phone, "user", user_message),
+            save_message(phone, "assistant", greeting_reply),
+            return_exceptions=True,
+        )
+        return greeting_reply
 
     # Load previous history and persist the new message concurrently.
     history_limit = max(settings.max_history_length - 1, 0)
