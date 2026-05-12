@@ -32,6 +32,7 @@ SYSTEM_PROMPT_RULES = (
     "- Langsung berikan harga atau info tanpa basa-basi.\n"
     "- DILARANG menuliskan label peran seperti 'User:', 'Assistant:', atau menampilkan proses berpikir internal Anda.\n"
     "- DILARANG menulis token internal seperti <|channel|>, <|message|>, <think>, markdown fence, JSON, atau kata 'Continue'.\n"
+    "- Output hanya isi pesan final untuk pelanggan WhatsApp. Jangan awali dengan metadata, format chat, role, atau penjelasan sistem.\n"
     "- Ramah, 1-2 emoji.\n"
     "- Gambar/desain: deskripsikan, beri saran & estimasi.\n"
     "- Jika pelanggan ingin deal/order/lanjut/DP/lunas, jangan arahkan ke nomor lain.\n"
@@ -128,18 +129,46 @@ def _sanitize_ai_reply(raw_reply: object) -> str:
         or has_too_many_control_words
         or is_noise_only
     ):
-        logger.warning(
-            "LLM reply unusable after sanitizing; using safe fallback "
-            "(chars=%d control_words=%d internal_tokens=%s noise_only=%s)",
-            len(text),
-            control_word_count,
-            has_internal_tokens_after_cleaning,
-            is_noise_only,
+        raise ValueError(
+            "LLM reply unusable after sanitizing "
+            f"(chars={len(text)} control_words={control_word_count} "
+            f"internal_tokens={has_internal_tokens_after_cleaning} noise_only={is_noise_only})"
         )
-        return "Maaf, respons otomatis sempat tidak terbaca. Admin akan bantu lanjutkan di chat ini ya. 🙏"
 
     return text
 
+
+async def _repair_ai_reply(llm: ChatNebius, bad_reply: object, user_message: str, timeout: float) -> str:
+    """Ask the model once to rewrite malformed output as a customer-safe WhatsApp reply."""
+    repair_messages = [
+        SystemMessage(
+            content=(
+                "Anda adalah CS Toko Teladan Percetakan & ATK. "
+                "Tulis ulang jawaban menjadi SATU pesan WhatsApp untuk pelanggan. "
+                "DILARANG memakai token internal, role label, markdown, JSON, code fence, atau kata Continue. "
+                "Jangan jelaskan proses. Output hanya pesan final."
+            )
+        ),
+        HumanMessage(
+            content=(
+                "Pesan pelanggan:\n"
+                f"{user_message}\n\n"
+                "Output model sebelumnya yang harus diperbaiki:\n"
+                f"{str(bad_reply)[:1200]}\n\n"
+                "Tulis pesan final yang aman dan natural."
+            )
+        ),
+    ]
+    response = await asyncio.wait_for(llm.ainvoke(repair_messages), timeout=timeout)
+    return _sanitize_ai_reply(response.content)
+
+
+def _log_unusable_ai_reply(error: Exception, phone: str) -> None:
+    logger.error(
+        "LLM [phone=%s]: Refusing to send unusable/internal-looking reply: %s",
+        phone,
+        error,
+    )
 
 def _history_content_is_usable(content: str) -> bool:
     if INTERNAL_TOKEN_RE.search(content) or len(REPEATED_CONTROL_RE.findall(content)) >= 3:
@@ -254,7 +283,20 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             llm.ainvoke(messages),
             timeout=settings.nebius_request_timeout_seconds,
         )
-        reply = _sanitize_ai_reply(response.content)
+        try:
+            reply = _sanitize_ai_reply(response.content)
+        except ValueError as sanitize_error:
+            logger.warning(
+                "LLM [phone=%s]: Initial reply failed strict validation; retrying repair once: %s",
+                phone,
+                sanitize_error,
+            )
+            reply = await _repair_ai_reply(
+                llm,
+                response.content,
+                user_message,
+                timeout=min(settings.nebius_request_timeout_seconds, 15.0),
+            )
         logger.info("LLM [phone=%s]: Response SUCCESS. Reply length: %d chars.", phone, len(str(reply)))
 
         # Save AI reply to Supabase
@@ -269,6 +311,9 @@ async def get_ai_response(phone: str, user_message: str) -> str:
             settings.nebius_request_timeout_seconds,
         )
         return "Maaf, respons AI sedang lambat. Admin akan bantu lanjutkan di chat ini ya. 🙏"
+    except ValueError as e:
+        _log_unusable_ai_reply(e, phone)
+        raise
     except Exception as e:
         logger.exception("LLM [phone=%s]: ERROR calling Nebius LLM. Exception: %s", phone, str(e))
         return "Sorry, I'm having trouble thinking right now. Please try again in a moment. 🙏"
