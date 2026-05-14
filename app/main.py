@@ -16,6 +16,10 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+# Suppress noisy HTTP request logs from third-party libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # ── FastAPI app ──────────────────────────────────────────────────
 app = FastAPI(
     title="WhatsApp AI Customer Service Chatbot",
