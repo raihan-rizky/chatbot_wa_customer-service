@@ -18,7 +18,7 @@ def _headers() -> dict[str, str]:
     return {
         "apikey": settings.supabase_service_key,
         "Authorization": f"Bearer {settings.supabase_service_key}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json", 
         "Prefer": "return=minimal",
     }
 

@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, 
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.logging_config import set_phone
 from app.services.abuse_control import get_sender_defense, mark_blocked, record_abuse
 from app.services.llm_service import get_ai_response
 from app.services.chat_history import count_user_messages, save_message
@@ -223,6 +224,7 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
 async def _process_incoming_message(event: str, sender: str, msg_id: str, payload: dict) -> None:
     """Process a WAHA message after the webhook has already been acknowledged."""
+    set_phone(sender)
     process_started = time.perf_counter()
     audit_task = asyncio.create_task(save_waha_event(event, sender, msg_id, payload))
 

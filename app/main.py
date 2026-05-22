@@ -2,25 +2,15 @@
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import FastAPI
 
+from app.logging_config import setup_logging
 from app.routes.webhook import router as webhook_router
 from app.services.http_client import close_http_clients
 
-# ── Logging ──────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s │ %(levelname)-7s │ %(name)s │ %(message)s",
-    datefmt="%H:%M:%S",
-)
+# Configure logging before anything else imports a logger.
+setup_logging()
 
-# Suppress noisy HTTP request logs from third-party libraries
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-# ── FastAPI app ──────────────────────────────────────────────────
 app = FastAPI(
     title="WhatsApp AI Customer Service Chatbot",
     description="Customer-facing AI WhatsApp chatbot for Toko Teladan",
@@ -42,7 +32,7 @@ async def shutdown_event() -> None:
     await close_http_clients()
 
 
-# ── Run directly with `python -m app.main` ──────────────────────
+# Run directly with `python -m app.main`.
 if __name__ == "__main__":
     import uvicorn
 

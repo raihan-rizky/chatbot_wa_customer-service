@@ -1,4 +1,8 @@
-"""Product catalog service — fetch products from Supabase pos_products table."""
+"""Product catalog service - Supabase pos_products lookup with bounded payloads.
+
+Replaces the full-catalog fetch with a small summary (categories + price ranges)
+plus targeted keyword search. This keeps prompt sizes flat as the catalog grows.
+"""
 
 from __future__ import annotations
 
@@ -13,39 +17,64 @@ logger = logging.getLogger(__name__)
 
 TABLE = "pos_products"
 
-# ── Simple in-memory cache ──────────────────────────────────────
-_cache: list[dict] | None = None
-_cache_ts: float = 0
-CACHE_TTL = 300  # 5 minutes
+# -- Catalog summary cache (small, refreshed every 10 min) ----------
+_summary_cache: dict | None = None
+_summary_cache_ts: float = 0.0
+SUMMARY_CACHE_TTL = 600
+
+# -- Per-query product search cache (bounded LRU-ish) ---------------
+_search_cache: dict[str, tuple[float, list[dict]]] = {}
+SEARCH_CACHE_TTL = 120
+SEARCH_CACHE_MAX = 256
 
 GENERIC_QUERY_WORDS = {
-    "admin",
-    "assalam",
-    "assalamualaikum",
-    "bisa",
-    "bro",
-    "buk",
-    "halo",
-    "hallo",
-    "harga",
-    "hai",
-    "hello",
-    "info",
-    "kak",
-    "mas",
-    "mbak",
-    "min",
-    "minta",
-    "pak",
-    "pagi",
-    "siang",
-    "sore",
-    "malam",
+    "admin", "ada", "aja", "assalam", "assalamualaikum", "atau", "bagaimana",
+    "beli", "berapa", "bisa", "bro", "buk", "cari", "dari", "dengan", "gan",
+    "gimana", "hai", "hallo", "halo", "harga", "hello", "info", "ini", "itu",
+    "kak", "kakak", "kalo", "kalau", "malam", "mas", "mau", "mbak", "min",
+    "minta", "pada", "pagi", "pak", "saja", "siang", "sis", "sore", "tolong",
+    "untuk", "yang",
 }
+
+# Indonesian/English synonyms -> canonical search tokens that exist in our catalog.
+SYNONYMS: dict[str, list[str]] = {
+    "banner": ["spanduk", "flexi", "banner"],
+    "spanduk": ["spanduk", "flexi"],
+    "flexi": ["flexi"],
+    "sticker": ["stiker"],
+    "stiker": ["stiker"],
+    "vinyl": ["vinyl"],
+    "print": ["cetak"],
+    "cetak": ["cetak"],
+    "outdoor": ["outdoor"],
+    "indoor": ["indoor"],
+    "atk": ["atk"],
+    "kantor": ["atk"],
+    "stationary": ["atk"],
+    "stationery": ["atk"],
+    "pulpen": ["pulpen", "pen"],
+    "pen": ["pulpen", "pen"],
+    "buku": ["buku"],
+    "kertas": ["kertas", "paper"],
+    "paper": ["kertas", "paper"],
+    "albatros": ["albatros"],
+    "pvc": ["pvc"],
+    "luster": ["luster"],
+    "oneway": ["one way"],
+    "onewayvision": ["one way"],
+    "poster": ["poster", "albatros", "luster"],
+    "brosur": ["brosur", "kertas"],
+    "logo": ["stiker", "kertas"],
+    "xbanner": ["banner", "luster"],
+    "rollup": ["banner"],
+    "rollbanner": ["banner"],
+}
+
+# Short tokens that must still be considered (sizes / abbreviations).
+ALLOWED_SHORT_TOKENS = {"a3", "a4", "a5", "a6", "b5", "b6", "f4", "pvc", "atk"}
 
 
 def _headers() -> dict[str, str]:
-    """Build Supabase REST API headers."""
     settings = get_settings()
     return {
         "apikey": settings.supabase_service_key,
@@ -60,87 +89,150 @@ def _base_url() -> str:
     return f"{settings.supabase_url}/rest/v1/{TABLE}"
 
 
-async def fetch_products() -> list[dict]:
-    """Fetch all products from Supabase, with a 5-minute cache.
+def _normalize_token(token: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", token.lower())
 
-    Returns:
-        List of product dicts with keys: name, sku, price, unit, categoryId, material, stock.
+
+def _expand_keywords(words: list[str]) -> list[str]:
+    """Apply the synonym map and dedupe while preserving priority order."""
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for word in words:
+        norm = _normalize_token(word)
+        if not norm:
+            continue
+        for cand in SYNONYMS.get(norm, [norm]):
+            cand = cand.strip().lower()
+            if cand and cand not in seen:
+                seen.add(cand)
+                expanded.append(cand)
+    return expanded
+
+
+def _message_keywords(message: str, limit: int = 5) -> list[str]:
+    """Extract meaningful tokens from a free-form message."""
+    raw_words = re.findall(r"[a-z0-9]+", message.lower())
+    candidates: list[str] = []
+    for word in sorted(raw_words, key=len, reverse=True):
+        if word in GENERIC_QUERY_WORDS or word in candidates:
+            continue
+        if len(word) < 3 and word not in ALLOWED_SHORT_TOKENS:
+            continue
+        candidates.append(word)
+        if len(candidates) >= limit:
+            break
+    expanded = _expand_keywords(candidates)
+    # Cap expanded list so the OR filter does not balloon.
+    return expanded[: limit * 2]
+
+
+# -- Catalog summary -----------------------------------------------
+async def fetch_catalog_summary() -> dict:
+    """Return a compact summary of the catalog (categories + price ranges).
+
+    The payload stays tiny regardless of catalog size, so we cache aggressively.
     """
-    global _cache, _cache_ts
+    global _summary_cache, _summary_cache_ts
 
-    # Return cached data if still fresh
-    if _cache is not None and (time.time() - _cache_ts) < CACHE_TTL:
-        logger.info("Product fetch: Using cached products (count: %d)", len(_cache))
-        return _cache
+    if _summary_cache is not None and (time.time() - _summary_cache_ts) < SUMMARY_CACHE_TTL:
+        return _summary_cache
 
-    logger.info("Product fetch: Starting request to Supabase...")
     params = {
-        "select": "name,sku,price,unit,categoryId,material,stock",
-        "order": "categoryId.asc,name.asc",
+        "select": "categoryId,price",
+        "order": "categoryId.asc",
     }
-
     try:
         client = get_supabase_client()
         resp = await client.get(_base_url(), headers=_headers(), params=params)
         if resp.status_code >= 400:
-            logger.error("Product fetch failed: HTTP %s - %s", resp.status_code, resp.text)
-            return _cache or []
-
-        products = resp.json()
-        _cache = products
-        _cache_ts = time.time()
-        logger.info("Product fetch SUCCESS: Retrieved %d products from Supabase", len(products))
-        return products
+            logger.error("Catalog summary failed: HTTP %s - %s", resp.status_code, resp.text[:200])
+            return _summary_cache or {"categories": [], "total": 0}
+        rows = resp.json()
     except Exception as e:
-        logger.exception("Product fetch ERROR: An exception occurred during fetch_products. Exception: %s", str(e))
-        return _cache or []
+        logger.exception("Catalog summary ERROR: %s", str(e))
+        return _summary_cache or {"categories": [], "total": 0}
+
+    by_cat: dict[str, dict] = {}
+    for row in rows:
+        cat = row.get("categoryId") or "Lainnya"
+        price = row.get("price") or 0
+        bucket = by_cat.setdefault(cat, {"count": 0, "min": price, "max": price})
+        bucket["count"] += 1
+        if price:
+            if price < bucket["min"] or bucket["min"] == 0:
+                bucket["min"] = price
+            if price > bucket["max"]:
+                bucket["max"] = price
+
+    summary = {
+        "total": len(rows),
+        "categories": [
+            {"name": name, **stats}
+            for name, stats in sorted(by_cat.items(), key=lambda kv: kv[0])
+        ],
+    }
+    _summary_cache = summary
+    _summary_cache_ts = time.time()
+    logger.info(
+        "Catalog summary cached: %d categories, %d products total",
+        len(summary["categories"]),
+        summary["total"],
+    )
+    return summary
 
 
-def _message_keywords(message: str, limit: int = 5) -> list[str]:
-    words = re.findall(r"[a-z0-9]+", message.lower())
-    deduped: list[str] = []
-    for word in sorted(words, key=len, reverse=True):
-        if len(word) < 3 or word in GENERIC_QUERY_WORDS or word in deduped:
-            continue
-        deduped.append(word)
-        if len(deduped) >= limit:
-            break
-    return deduped
+def format_catalog_summary(summary: dict) -> str:
+    """Render the summary dict as a short text block."""
+    cats = summary.get("categories") or []
+    if not cats:
+        return "Katalog kosong"
+    lines = [f"Total {summary.get('total', 0)} produk. Kategori:"]
+    for c in cats:
+        lo = int(c.get("min") or 0)
+        hi = int(c.get("max") or 0)
+        lines.append(
+            f"- {c['name']}: {c['count']} produk, Rp{lo:,}-Rp{hi:,}".replace(",", ".")
+        )
+    return "\n".join(lines)
 
 
-def _filter_products(products: list[dict], keywords: list[str]) -> list[dict]:
-    if not keywords:
-        return []
-
-    filtered: list[dict] = []
-    for product in products:
-        searchable_text = (
-            f"{product.get('name', '')} "
-            f"{product.get('categoryId', '')} "
-            f"{product.get('material', '')}"
-        ).lower()
-        if any(keyword in searchable_text for keyword in keywords):
-            filtered.append(product)
-    return filtered
+# -- Targeted product search ---------------------------------------
+def _search_cache_get(key: str) -> list[dict] | None:
+    entry = _search_cache.get(key)
+    if not entry:
+        return None
+    ts, products = entry
+    if time.time() - ts > SEARCH_CACHE_TTL:
+        _search_cache.pop(key, None)
+        return None
+    return products
 
 
-async def fetch_matching_products(user_message: str) -> list[dict]:
-    """Fetch likely relevant products without loading the full catalog on cold cache."""
-    global _cache, _cache_ts
+def _search_cache_set(key: str, products: list[dict]) -> None:
+    if len(_search_cache) >= SEARCH_CACHE_MAX:
+        oldest_key = min(_search_cache.items(), key=lambda kv: kv[1][0])[0]
+        _search_cache.pop(oldest_key, None)
+    _search_cache[key] = (time.time(), products)
 
+
+async def fetch_matching_products(user_message: str, limit: int = 40) -> list[dict]:
+    """Return a small slice of the catalog relevant to the user's message."""
     keywords = _message_keywords(user_message)
     if not keywords:
         return []
 
-    if _cache is not None and (time.time() - _cache_ts) < CACHE_TTL:
-        return _filter_products(_cache, keywords)
+    cache_key = "|".join(sorted(keywords)) + f"#{limit}"
+    cached = _search_cache_get(cache_key)
+    if cached is not None:
+        logger.info("Product search: cache hit (%d products) key=%s", len(cached), cache_key)
+        return cached
 
     or_filters: list[str] = []
     for keyword in keywords:
-        safe_keyword = re.sub(r"[^a-z0-9]", "", keyword)
-        if not safe_keyword:
+        safe = _normalize_token(keyword)
+        if not safe:
             continue
-        wildcard = f"*{safe_keyword}*"
+        wildcard = f"*{safe}*"
         or_filters.extend(
             [
                 f"name.ilike.{wildcard}",
@@ -148,7 +240,6 @@ async def fetch_matching_products(user_message: str) -> list[dict]:
                 f"material.ilike.{wildcard}",
             ]
         )
-
     if not or_filters:
         return []
 
@@ -156,17 +247,18 @@ async def fetch_matching_products(user_message: str) -> list[dict]:
         "select": "name,sku,price,unit,categoryId,material,stock",
         "or": f"({','.join(or_filters)})",
         "order": "categoryId.asc,name.asc",
-        "limit": "40",
+        "limit": str(limit),
     }
 
     try:
         client = get_supabase_client()
         resp = await client.get(_base_url(), headers=_headers(), params=params)
         if resp.status_code >= 400:
-            logger.error("Product search failed: HTTP %s - %s", resp.status_code, resp.text)
+            logger.error("Product search failed: HTTP %s - %s", resp.status_code, resp.text[:200])
             return []
         products = resp.json()
-        logger.info("Product search SUCCESS: Retrieved %d matching products", len(products))
+        _search_cache_set(cache_key, products)
+        logger.info("Product search SUCCESS: %d products keywords=%s", len(products), keywords)
         return products
     except Exception as e:
         logger.exception("Product search ERROR: %s", str(e))
@@ -174,7 +266,7 @@ async def fetch_matching_products(user_message: str) -> list[dict]:
 
 
 def format_products_for_prompt(products: list[dict]) -> str:
-    """Format product list into a compressed string to save tokens."""
+    """Compact text representation of a product list for LLM prompts."""
     if not products:
         return "Katalog kosong"
 
@@ -182,12 +274,10 @@ def format_products_for_prompt(products: list[dict]) -> str:
     for p in products:
         cat = p.get("categoryId") or "-"
         name = p.get("name", "?")
-        price = f"Rp{p.get('price',0):.0f}/{p.get('unit','pcs')}"
-        mat = p.get("material", "") or "-"
-        sku = p.get("sku", "") or "-"
+        price = f"Rp{p.get('price', 0):.0f}/{p.get('unit', 'pcs')}"
+        mat = p.get("material") or "-"
+        sku = p.get("sku") or "-"
         stok = p.get("stock", 0)
         stok_str = "HABIS" if stok is not None and stok <= 0 else str(stok)
-        
         lines.append(f"{cat}|{name}|{price}|{mat}|{sku}|{stok_str}")
-
     return "\n".join(lines)
