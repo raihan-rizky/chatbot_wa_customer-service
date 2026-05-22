@@ -62,6 +62,20 @@ SYSTEM_PROMPT_RULES = (
     "}"
 )
 
+SYSTEM_PROMPT_UPSELL = (
+    "\nUPSELLING (AKTIF KARENA PELANGGAN CLOSING DEAL):\n"
+    "- SETELAH konfirmasi order & info admin, tambahkan 1 kalimat singkat "
+    "menyarankan produk lain yang relevan dari katalog di atas.\n"
+    "- Pilih produk yang melengkapi pesanan pelanggan "
+    "(misal: order banner → sarankan stiker/X-banner, "
+    "order ATK → sarankan alat tulis lain, order cetak brosur → sarankan kartu nama).\n"
+    "- Tone santai & membantu, jangan agresif. "
+    "Contoh: 'Oh ya, buat banner-nya kami juga ada stiker vinyl buat branding lho, mau lihat?'\n"
+    "- Jika pelanggan menolak atau tidak tertarik, jangan paksakan atau ulangi saran.\n"
+    "- Jangan sarankan produk yang sudah dipesan pelanggan.\n"
+    "- Maksimal 1 saran upsell per pesan.\n"
+)
+
 # -- Tool schema -----------------------------------------------------
 TOOLS = [
     {
@@ -120,12 +134,15 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def _build_system_prompt(user_message: str) -> str:
+async def _build_system_prompt(user_message: str, *, is_closing: bool = False) -> str:
     """Build the system prompt with a small relevant catalog slice.
 
     First tries keyword pre-fetch. If that returns nothing, falls back to a
     compact catalog summary so the model still knows what categories exist
     and can call search_products with its own phrasing.
+
+    When is_closing=True, appends upselling instructions so the LLM suggests
+    a relevant complementary product in its reply.
     """
     logger.info("LLM: Building system prompt...")
     filtered_products = await fetch_matching_products(user_message)
@@ -147,7 +164,7 @@ async def _build_system_prompt(user_message: str) -> str:
             len(summary.get("categories", [])),
         )
 
-    return (
+    prompt = (
         SYSTEM_PROMPT_BASE
         + "\n\n"
         + catalog_label
@@ -156,6 +173,9 @@ async def _build_system_prompt(user_message: str) -> str:
         + "\n"
         + SYSTEM_PROMPT_RULES
     )
+    if is_closing:
+        prompt += SYSTEM_PROMPT_UPSELL
+    return prompt
 
 
 async def _execute_tool_call(name: str, arguments: str) -> str:
@@ -280,8 +300,12 @@ async def _chat_with_tools(client: AsyncOpenAI, settings, messages: list, phone:
     return _extract_json_response(final, phone)
 
 
-async def get_ai_response(phone: str, user_message: str) -> str:
-    """Generate an AI response using persistent Supabase history."""
+async def get_ai_response(phone: str, user_message: str, *, is_closing: bool = False) -> str:
+    """Generate an AI response using persistent Supabase history.
+
+    When is_closing=True, the system prompt includes upselling instructions
+    so the reply can suggest a relevant complementary product.
+    """
     logger.info("LLM [phone=%s]: Starting response generation...", phone)
     client = _get_client()
     settings = get_settings()
@@ -309,7 +333,7 @@ async def get_ai_response(phone: str, user_message: str) -> str:
     history_rows.append({"role": "user", "content": user_message, "image_url": None, "created_at": None})
     logger.info("LLM [phone=%s]: Loaded %d history rows.", phone, len(history_rows))
 
-    system_prompt = await _build_system_prompt(user_message)
+    system_prompt = await _build_system_prompt(user_message, is_closing=is_closing)
 
     messages: list = [{"role": "system", "content": system_prompt}]
     for i, row in enumerate(history_rows):

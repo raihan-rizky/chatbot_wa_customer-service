@@ -315,8 +315,26 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
         elif msg_type == "chat":
             text = payload.get("body", "")
             if text:
+                # Pre-classify closing intent BEFORE generating the AI reply
+                # so we can inject upselling instructions when it's a deal.
+                pre_closing_result = await classify_closing_intent(
+                    sender,
+                    text,
+                    latest_message_saved=False,
+                    stored_user_message_count=user_message_count + 1,
+                )
+                is_closing = pre_closing_result.is_closing
+                logger.info(
+                    "Pre-classification for %s message=%s is_closing=%s trigger=%s confidence=%.2f",
+                    sender,
+                    msg_id,
+                    is_closing,
+                    pre_closing_result.trigger,
+                    pre_closing_result.confidence,
+                )
+
                 reply_started = time.perf_counter()
-                reply = await _handle_text(sender, text)
+                reply = await _handle_text(sender, text, is_closing=is_closing)
                 logger.info(
                     "Customer reply path completed for %s message=%s elapsed_ms=%d total_elapsed_ms=%d",
                     sender,
@@ -325,70 +343,64 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
                     int((time.perf_counter() - process_started) * 1000),
                 )
 
-                closing_result = await classify_closing_intent(
-                    sender,
-                    text,
-                    latest_message_saved=True,
-                    stored_user_message_count=user_message_count + 1,
-                )
-                closing_detected = closing_result.is_closing
-                if closing_result.is_closing:
+                # If pre-classification already detected closing, skip re-classifying
+                # and directly mark the negotiation + notify admin.
+                if is_closing:
                     logger.info(
-                        "Closing detected for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
+                        "Closing pre-detected for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
                         sender,
                         msg_id,
-                        closing_result.trigger,
-                        closing_result.confidence,
-                        closing_result.fallback_used,
-                        closing_result.reason,
+                        pre_closing_result.trigger,
+                        pre_closing_result.confidence,
+                        pre_closing_result.fallback_used,
+                        pre_closing_result.reason,
                     )
                     await mark_negotiation_closed(sender)
                     await notify_closing(sender, sender, text)
                 else:
-                    logger.info(
-                        "Closing not detected for %s from message %s trigger=%s confidence=%.2f reason=%s",
-                        sender,
-                        msg_id,
-                        closing_result.trigger,
-                        closing_result.confidence,
-                        closing_result.reason,
-                    )
-                if (
-                    not closing_detected
-                    and reply
-                    and assistant_response_requests_admin_handoff(reply)
-                ):
-                    logger.info(
-                        "Assistant handoff phrase detected for %s from message %s; forcing closing classifier",
-                        sender,
-                        msg_id,
-                    )
-                    handoff_result = await classify_closing_intent(
-                        sender,
-                        text,
-                        force_trigger="assistant_admin_handoff_phrase",
-                        latest_message_saved=True,
-                        stored_user_message_count=user_message_count + 1,
-                    )
-                    if handoff_result.is_closing:
+                    # Fallback: check if the assistant's reply indicates admin handoff
+                    # (the LLM may have detected closing intent that keywords missed).
+                    if reply and assistant_response_requests_admin_handoff(reply):
                         logger.info(
-                            "Closing detected after assistant handoff for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
+                            "Assistant handoff phrase detected for %s from message %s; forcing closing classifier",
                             sender,
                             msg_id,
-                            handoff_result.trigger,
-                            handoff_result.confidence,
-                            handoff_result.fallback_used,
-                            handoff_result.reason,
                         )
-                        await mark_negotiation_closed(sender)
-                        await notify_closing(sender, sender, text)
+                        handoff_result = await classify_closing_intent(
+                            sender,
+                            text,
+                            force_trigger="assistant_admin_handoff_phrase",
+                            latest_message_saved=True,
+                            stored_user_message_count=user_message_count + 1,
+                        )
+                        if handoff_result.is_closing:
+                            logger.info(
+                                "Closing detected after assistant handoff for %s from message %s trigger=%s confidence=%.2f fallback=%s reason=%s",
+                                sender,
+                                msg_id,
+                                handoff_result.trigger,
+                                handoff_result.confidence,
+                                handoff_result.fallback_used,
+                                handoff_result.reason,
+                            )
+                            await mark_negotiation_closed(sender)
+                            await notify_closing(sender, sender, text)
+                        else:
+                            logger.info(
+                                "Assistant handoff classifier did not detect closing for %s from message %s confidence=%.2f reason=%s",
+                                sender,
+                                msg_id,
+                                handoff_result.confidence,
+                                handoff_result.reason,
+                            )
                     else:
                         logger.info(
-                            "Assistant handoff classifier did not detect closing for %s from message %s confidence=%.2f reason=%s",
+                            "Closing not detected for %s from message %s trigger=%s confidence=%.2f reason=%s",
                             sender,
                             msg_id,
-                            handoff_result.confidence,
-                            handoff_result.reason,
+                            pre_closing_result.trigger,
+                            pre_closing_result.confidence,
+                            pre_closing_result.reason,
                         )
         else:
             logger.info("Skipping unsupported message type: %s", msg_type)
@@ -404,14 +416,18 @@ async def _process_incoming_message(event: str, sender: str, msg_id: str, payloa
         )
 
 
-async def _handle_text(phone: str, text: str) -> str | None:
-    """Handle a text message — generate AI reply and save to Supabase."""
+async def _handle_text(phone: str, text: str, *, is_closing: bool = False) -> str | None:
+    """Handle a text message — generate AI reply and save to Supabase.
+
+    When is_closing=True, the LLM will include an upselling suggestion
+    for a relevant complementary product in its reply.
+    """
     logger.info("Text from %s: %s", phone, text[:80])
     started = time.perf_counter()
 
     try:
         # LLM will handle everything naturally based on its prompt
-        reply = await get_ai_response(phone, text)
+        reply = await get_ai_response(phone, text, is_closing=is_closing)
         logger.info(
             "AI reply ready for %s elapsed_ms=%d; sending to WAHA",
             phone,
