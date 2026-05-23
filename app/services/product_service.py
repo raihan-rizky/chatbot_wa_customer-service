@@ -196,6 +196,43 @@ def format_catalog_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+# -- Post-fetch low-stock verification -----------------------------
+async def _verify_low_stock(products: list[dict]) -> list[dict]:
+    """Re-fetch fresh stock for products in 1-10 range; merge corrected values."""
+    low_stock_skus = [
+        p["sku"]
+        for p in products
+        if p.get("sku") and p.get("stock") is not None and 1 <= p["stock"] <= 10
+    ]
+    if not low_stock_skus:
+        return products
+
+    params = {
+        "select": "sku,stock",
+        "sku": f"in.({','.join(low_stock_skus)})",
+    }
+    try:
+        client = get_supabase_client()
+        resp = await client.get(_base_url(), headers=_headers(), params=params)
+        if resp.status_code >= 400:
+            logger.error("Stock verify failed: HTTP %s", resp.status_code)
+            return products
+        fresh_rows = resp.json()
+    except Exception as e:
+        logger.exception("Stock verify ERROR: %s", str(e))
+        return products
+
+    fresh_map = {r["sku"]: r["stock"] for r in fresh_rows if "sku" in r}
+    for p in products:
+        if p.get("sku") in fresh_map:
+            cached = p["stock"]
+            fresh = fresh_map[p["sku"]]
+            if cached != fresh:
+                logger.info("Stock corrected: sku=%s cached=%d fresh=%d", p["sku"], cached, fresh)
+                p["stock"] = fresh
+    return products
+
+
 # -- Targeted product search ---------------------------------------
 def _search_cache_get(key: str) -> list[dict] | None:
     entry = _search_cache.get(key)
@@ -257,12 +294,24 @@ async def fetch_matching_products(user_message: str, limit: int = 40) -> list[di
             logger.error("Product search failed: HTTP %s - %s", resp.status_code, resp.text[:200])
             return []
         products = resp.json()
+        products = await _verify_low_stock(products)
         _search_cache_set(cache_key, products)
         logger.info("Product search SUCCESS: %d products keywords=%s", len(products), keywords)
         return products
     except Exception as e:
         logger.exception("Product search ERROR: %s", str(e))
         return []
+
+
+def _stock_label(stock: int | None) -> str:
+    """Qualitative stock label: Habis / Terbatas / Tersedia."""
+    if stock is None:
+        return "Tersedia"
+    if stock <= 0:
+        return "Habis"
+    if stock <= 10:
+        return "Terbatas"
+    return "Tersedia"
 
 
 def format_products_for_prompt(products: list[dict]) -> str:
@@ -277,7 +326,5 @@ def format_products_for_prompt(products: list[dict]) -> str:
         price = f"Rp{p.get('price', 0):.0f}/{p.get('unit', 'pcs')}"
         mat = p.get("material") or "-"
         sku = p.get("sku") or "-"
-        stok = p.get("stock", 0)
-        stok_str = "HABIS" if stok is not None and stok <= 0 else str(stok)
-        lines.append(f"{cat}|{name}|{price}|{mat}|{sku}|{stok_str}")
+        lines.append(f"{cat}|{name}|{price}|{mat}|{sku}|{_stock_label(p.get('stock'))}")
     return "\n".join(lines)
